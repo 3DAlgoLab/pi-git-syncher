@@ -7,7 +7,12 @@ import { execFile } from "node:child_process";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { devNull, tmpdir } from "node:os";
 import { join } from "node:path";
-import { createSyncer, type GitRunner, type GitResult, type Syncer } from "../syncer.ts";
+import {
+  createSyncer,
+  type GitRunner,
+  type GitResult,
+  type Syncer,
+} from "../syncer.ts";
 
 export const MIN = 60_000;
 export const DEBOUNCE = 30 * MIN;
@@ -32,19 +37,32 @@ export function makeRun(): GitRunner {
         (err, stdout, stderr) => {
           const e = err as (NodeJS.ErrnoException & { code?: number }) | null;
           const code = e && typeof e.code === "number" ? e.code : e ? 1 : 0;
-          resolve({ code, stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
+          resolve({
+            code,
+            stdout: String(stdout ?? ""),
+            stderr: String(stderr ?? ""),
+          });
         },
       );
     });
 }
 
-export async function sh(run: GitRunner, args: string[], cwd: string): Promise<string> {
+export async function sh(
+  run: GitRunner,
+  args: string[],
+  cwd: string,
+): Promise<string> {
   const res = await run(args, cwd);
-  if (res.code !== 0) throw new Error(`git ${args.join(" ")} failed: ${res.stderr}`);
+  if (res.code !== 0)
+    throw new Error(`git ${args.join(" ")} failed: ${res.stderr}`);
   return res.stdout.trim();
 }
 
-export async function ref(run: GitRunner, cwd: string, name: string): Promise<string> {
+export async function ref(
+  run: GitRunner,
+  cwd: string,
+  name: string,
+): Promise<string> {
   return sh(run, ["rev-parse", name], cwd);
 }
 
@@ -123,7 +141,6 @@ export async function makeFixture(
   };
 }
 
-
 function createSyncerForFixture(opts: {
   run: GitRunner;
   cwd: string;
@@ -147,10 +164,26 @@ export function advance(f: Fixture, minutes: number): void {
 }
 
 /** Pushes a new commit to the remote using a second clone. */
-export async function pushRemoteCommit(f: Fixture, file: string, content: string): Promise<void> {
+export async function pushRemoteCommit(
+  f: Fixture,
+  file: string,
+  content: string,
+): Promise<void> {
   const other = await f.otherClone();
   await writeFile(join(other, file), content);
   await sh(f.run, ["add", "-A"], other);
-  await sh(f.run, ["-c", "user.email=other@test.local", "-c", "user.name=Other", "commit", "-m", `remote ${file}`], other);
+  await sh(
+    f.run,
+    [
+      "-c",
+      "user.email=other@test.local",
+      "-c",
+      "user.name=Other",
+      "commit",
+      "-m",
+      `remote ${file}`,
+    ],
+    other,
+  );
   await sh(f.run, ["push"], other);
 }

@@ -1,6 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -11,18 +18,43 @@ import {
   parseConfig,
   saveConfig,
 } from "../syncer.ts";
-import { DEBOUNCE, advance, makeFixture, pushRemoteCommit, ref, sh } from "./helpers.ts";
+import {
+  DEBOUNCE,
+  advance,
+  makeFixture,
+  pushRemoteCommit,
+  ref,
+  sh,
+} from "./helpers.ts";
 
 test("parseConfig: defaults and validation", () => {
-  assert.deepEqual(parseConfig(null), { enabled: true, pollingIntervalMinutes: 1 });
-  assert.deepEqual(parseConfig({}), { enabled: true, pollingIntervalMinutes: 1 });
-  assert.deepEqual(parseConfig({ enabled: false }), { enabled: false, pollingIntervalMinutes: 1 });
-  assert.deepEqual(parseConfig({ pollingIntervalMinutes: 5 }), { enabled: true, pollingIntervalMinutes: 5 });
-  assert.deepEqual(parseConfig({ enabled: "nope", pollingIntervalMinutes: -3 }), {
+  assert.deepEqual(parseConfig(null), {
     enabled: true,
     pollingIntervalMinutes: 1,
   });
-  assert.equal(parseConfig({ pollingIntervalMinutes: 999999 }).pollingIntervalMinutes, 1440);
+  assert.deepEqual(parseConfig({}), {
+    enabled: true,
+    pollingIntervalMinutes: 1,
+  });
+  assert.deepEqual(parseConfig({ enabled: false }), {
+    enabled: false,
+    pollingIntervalMinutes: 1,
+  });
+  assert.deepEqual(parseConfig({ pollingIntervalMinutes: 5 }), {
+    enabled: true,
+    pollingIntervalMinutes: 5,
+  });
+  assert.deepEqual(
+    parseConfig({ enabled: "nope", pollingIntervalMinutes: -3 }),
+    {
+      enabled: true,
+      pollingIntervalMinutes: 1,
+    },
+  );
+  assert.equal(
+    parseConfig({ pollingIntervalMinutes: 999999 }).pollingIntervalMinutes,
+    1440,
+  );
 });
 
 test("loadConfig: missing, valid, and corrupt files", async (t) => {
@@ -35,9 +67,15 @@ test("loadConfig: missing, valid, and corrupt files", async (t) => {
   saveConfig(root, { enabled: false, pollingIntervalMinutes: 2.5 });
   const loaded = loadConfig(root);
   assert.equal(loaded.exists, true);
-  assert.deepEqual(loaded.config, { enabled: false, pollingIntervalMinutes: 2.5 });
+  assert.deepEqual(loaded.config, {
+    enabled: false,
+    pollingIntervalMinutes: 2.5,
+  });
   await writeFile(join(root, CONFIG_FILE), "{not json", "utf8");
-  assert.deepEqual(loadConfig(root).config, { enabled: true, pollingIntervalMinutes: 1 });
+  assert.deepEqual(loadConfig(root).config, {
+    enabled: true,
+    pollingIntervalMinutes: 1,
+  });
 });
 
 test("pull: fast-forwards when the remote is ahead", async (t) => {
@@ -50,7 +88,11 @@ test("pull: fast-forwards when the remote is ahead", async (t) => {
   const after = await ref(f.run, f.repo, "HEAD");
   assert.notEqual(before, after);
   assert.equal(after, await ref(f.run, f.remote, "main"));
-  assert.ok(f.notes.some((n) => n.type === "info" && n.message.includes("pulled 1 new commit")));
+  assert.ok(
+    f.notes.some(
+      (n) => n.type === "info" && n.message.includes("pulled 1 new commit"),
+    ),
+  );
   assert.equal(f.syncer.state.lastSyncKind, "pull");
 });
 
@@ -84,11 +126,19 @@ test("commit & push: commits after a quiet debounce", async (t) => {
 
   advance(f, 2); // 31 quiet minutes
   await f.syncer.tick();
-  assert.equal(await ref(f.run, f.remote, "main"), await ref(f.run, f.repo, "HEAD"));
+  assert.equal(
+    await ref(f.run, f.remote, "main"),
+    await ref(f.run, f.repo, "HEAD"),
+  );
   assert.notEqual(await ref(f.run, f.remote, "main"), remoteBefore);
   const subject = await sh(f.run, ["log", "-1", "--format=%s"], f.repo);
   assert.ok(subject.startsWith(COMMIT_PREFIX), subject);
-  assert.ok(f.notes.some((n) => n.type === "info" && n.message.includes("committed & pushed 1 file")));
+  assert.ok(
+    f.notes.some(
+      (n) =>
+        n.type === "info" && n.message.includes("committed & pushed 1 file"),
+    ),
+  );
   assert.equal(f.syncer.state.dirtySince, null);
   // The file actually landed on the remote.
   assert.equal(await sh(f.run, ["show", "main:new.txt"], f.remote), "content"); // sh() trims
@@ -150,7 +200,11 @@ test("commit & push: skipped without a remote", async (t) => {
   await f.syncer.tick();
   const localHead = await sh(f.run, ["log", "-1", "--format=%s"], f.repo);
   assert.equal(localHead, "init"); // nothing was committed
-  assert.ok(f.notes.some((n) => n.type === "warning" && n.message.includes("no remote")));
+  assert.ok(
+    f.notes.some(
+      (n) => n.type === "warning" && n.message.includes("no remote"),
+    ),
+  );
 });
 
 test("push: retries a failed push once the remote is reachable again", async (t) => {
@@ -160,14 +214,28 @@ test("push: retries a failed push once the remote is reachable again", async (t)
   advance(f, 31);
   await chmod(f.remote, 0o555); // push fails (local transport can't write refs)
   await f.syncer.tick(); // commit lands locally, push fails once
-  assert.equal((await sh(f.run, ["log", "-1", "--format=%s"], f.repo)).startsWith(COMMIT_PREFIX), true);
-  assert.ok(f.notes.some((n) => n.type === "warning" && n.message.includes("push failed")));
+  assert.equal(
+    (await sh(f.run, ["log", "-1", "--format=%s"], f.repo)).startsWith(
+      COMMIT_PREFIX,
+    ),
+    true,
+  );
+  assert.ok(
+    f.notes.some(
+      (n) => n.type === "warning" && n.message.includes("push failed"),
+    ),
+  );
   await f.syncer.tick(); // clean tree, still blocked: no duplicate warning
-  const warnings = f.notes.filter((n) => n.message.includes("push failed")).length;
+  const warnings = f.notes.filter((n) =>
+    n.message.includes("push failed"),
+  ).length;
   await chmod(f.remote, 0o755);
   await f.syncer.tick(); // remote reachable again -> push succeeds
   assert.equal(warnings, 1);
-  assert.equal(await ref(f.run, f.remote, "main"), await ref(f.run, f.repo, "HEAD"));
+  assert.equal(
+    await ref(f.run, f.remote, "main"),
+    await ref(f.run, f.repo, "HEAD"),
+  );
   assert.ok(f.notes.some((n) => n.message.includes("pushed 1 pending commit")));
 });
 
@@ -196,7 +264,9 @@ test("toggle: writes the config file and flips the flag", async (t) => {
   assert.equal(res1.root, f.repo);
   assert.equal(res1.enabled, false);
   assert.equal(
-    (await readFile(join(f.repo, CONFIG_FILE), "utf8")).includes('"enabled": false'),
+    (await readFile(join(f.repo, CONFIG_FILE), "utf8")).includes(
+      '"enabled": false',
+    ),
     true,
   );
   const res2 = await f.syncer.toggle();
@@ -227,10 +297,23 @@ test("config file: an untracked .git-syncher.json does not make the repo dirty",
   // Toggling creates the (untracked) config file.
   await f.syncer.toggle();
   await f.syncer.toggle();
-  const exclude = await readFile(join(f.repo, ".git", "info", "exclude"), "utf8");
-  assert.ok(exclude.includes(CONFIG_FILE), "config file listed in .git/info/exclude");
+  const exclude = await readFile(
+    join(f.repo, ".git", "info", "exclude"),
+    "utf8",
+  );
+  assert.ok(
+    exclude.includes(CONFIG_FILE),
+    "config file listed in .git/info/exclude",
+  );
   await f.syncer.tick();
-  assert.equal(f.syncer.state.dirtySince, null, "no dirty clock for a config-only change");
-  assert.equal(await ref(f.run, f.repo, "HEAD"), await ref(f.run, f.remote, "main"));
+  assert.equal(
+    f.syncer.state.dirtySince,
+    null,
+    "no dirty clock for a config-only change",
+  );
+  assert.equal(
+    await ref(f.run, f.repo, "HEAD"),
+    await ref(f.run, f.remote, "main"),
+  );
   assert.ok(f.notes.some((n) => n.message.includes("pulled 1 new commit")));
 });

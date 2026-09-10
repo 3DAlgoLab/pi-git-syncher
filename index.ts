@@ -9,7 +9,10 @@
  * interval always follows the current config file.
  */
 
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type {
+  ExtensionAPI,
+  ExtensionContext,
+} from "@earendil-works/pi-coding-agent";
 import { join } from "node:path";
 import {
   CONFIG_FILE,
@@ -32,7 +35,8 @@ export default function (pi: ExtensionAPI) {
   function bind(sessionCtx: ExtensionContext): Syncer {
     ctx = sessionCtx;
     syncer = createSyncer({
-      run: (args, cwd) => pi.exec("git", args, { cwd, timeout: GIT_TIMEOUT_MS }),
+      run: (args, cwd) =>
+        pi.exec("git", args, { cwd, timeout: GIT_TIMEOUT_MS }),
       getCwd: () => ctx?.cwd ?? process.cwd(),
       isIdle: () => ctx?.isIdle() ?? true,
       notify: (type, message) => {
@@ -91,7 +95,8 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.registerCommand("git-sync", {
-    description: "Toggle pi-git-syncher for this repo; `git-sync status` shows state",
+    description:
+      "Toggle pi-git-syncher for this repo; `git-sync status` shows state",
     handler: async (args, cmdCtx) => {
       const s = syncer ?? bind(cmdCtx);
       const arg = args.trim().toLowerCase();
@@ -109,7 +114,10 @@ export default function (pi: ExtensionAPI) {
         cmdCtx.ui.notify(`git-syncher: ${res.error}`, "error");
         return;
       }
-      cmdCtx.ui.notify(`git-syncher: ${res.enabled ? "ON" : "OFF"} — ${res.root}`, "info");
+      cmdCtx.ui.notify(
+        `git-syncher: ${res.enabled ? "ON" : "OFF"} — ${res.root}`,
+        "info",
+      );
     },
   });
 }
@@ -123,6 +131,7 @@ function formatStatus(st: SyncerStatus): string {
     `dirty:  ${st.dirty ? `yes, quiet since ${new Date(st.dirtySince ?? 0).toISOString()}` : "no"}`,
     `last:   ${st.lastSyncAt ? `${st.lastSyncKind} at ${new Date(st.lastSyncAt).toISOString()}` : "never"}`,
   ];
-  if (!st.configExists) lines.push(`config: ${CONFIG_FILE} not found (using defaults)`);
+  if (!st.configExists)
+    lines.push(`config: ${CONFIG_FILE} not found (using defaults)`);
   return lines.join("\n");
 }

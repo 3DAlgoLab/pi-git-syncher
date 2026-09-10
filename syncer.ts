@@ -112,13 +112,19 @@ export function parseConfig(raw: unknown): GitSyncherConfig {
       Number.isFinite(obj.pollingIntervalMinutes) &&
       obj.pollingIntervalMinutes > 0
     ) {
-      config.pollingIntervalMinutes = Math.min(obj.pollingIntervalMinutes, MAX_POLLING_MINUTES);
+      config.pollingIntervalMinutes = Math.min(
+        obj.pollingIntervalMinutes,
+        MAX_POLLING_MINUTES,
+      );
     }
   }
   return config;
 }
 
-export function loadConfig(root: string): { config: GitSyncherConfig; exists: boolean } {
+export function loadConfig(root: string): {
+  config: GitSyncherConfig;
+  exists: boolean;
+} {
   try {
     const raw = readFileSync(join(root, CONFIG_FILE), "utf8");
     return { config: parseConfig(JSON.parse(raw)), exists: true };
@@ -128,7 +134,11 @@ export function loadConfig(root: string): { config: GitSyncherConfig; exists: bo
 }
 
 export function saveConfig(root: string, config: GitSyncherConfig): void {
-  writeFileSync(join(root, CONFIG_FILE), `${JSON.stringify(config, null, 2)}\n`, "utf8");
+  writeFileSync(
+    join(root, CONFIG_FILE),
+    `${JSON.stringify(config, null, 2)}\n`,
+    "utf8",
+  );
 }
 
 export function createSyncer(options: SyncerOptions): Syncer {
@@ -148,7 +158,8 @@ export function createSyncer(options: SyncerOptions): Syncer {
     lastSyncKind: null,
   };
 
-  const git = (args: string[], cwd: string): Promise<GitResult> => run(args, cwd);
+  const git = (args: string[], cwd: string): Promise<GitResult> =>
+    run(args, cwd);
 
   function warnOnce(key: string, message: string): void {
     if (state.warned.has(key)) return;
@@ -191,7 +202,9 @@ export function createSyncer(options: SyncerOptions): Syncer {
       if (gitDirRes.code !== 0) return;
       const excludePath = join(gitDirRes.stdout.trim(), "info", "exclude");
       mkdirSync(join(gitDirRes.stdout.trim(), "info"), { recursive: true });
-      const current = existsSync(excludePath) ? readFileSync(excludePath, "utf8") : "";
+      const current = existsSync(excludePath)
+        ? readFileSync(excludePath, "utf8")
+        : "";
       if (!current.split("\n").includes(CONFIG_FILE)) {
         appendFileSync(excludePath, `${CONFIG_FILE}\n`, "utf8");
       }
@@ -201,7 +214,10 @@ export function createSyncer(options: SyncerOptions): Syncer {
     }
   }
   async function hasUpstream(root: string): Promise<boolean> {
-    const res = await git(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], root);
+    const res = await git(
+      ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+      root,
+    );
     return res.code === 0;
   }
 
@@ -212,7 +228,11 @@ export function createSyncer(options: SyncerOptions): Syncer {
     return Number.isFinite(n) ? n : 0;
   }
 
-  async function commitAndPush(root: string, branch: string, fileCount: number): Promise<boolean> {
+  async function commitAndPush(
+    root: string,
+    branch: string,
+    fileCount: number,
+  ): Promise<boolean> {
     const remote = await remoteUrl(root);
     if (!remote) {
       warnOnce("no-remote", "no remote 'origin'; commit & push skipped");
@@ -221,18 +241,30 @@ export function createSyncer(options: SyncerOptions): Syncer {
     const message = `${COMMIT_PREFIX}: auto-commit ${fileCount} file(s), ${new Date(now()).toISOString()}`;
     const add = await git(["add", "-A"], root);
     if (add.code !== 0) {
-      warnOnce("add-failed", `git add failed: ${firstLine(add.stderr || add.stdout)}`);
+      warnOnce(
+        "add-failed",
+        `git add failed: ${firstLine(add.stderr || add.stdout)}`,
+      );
       return false;
     }
     const commit = await git(["commit", "-m", message], root);
     if (commit.code !== 0) {
-      warnOnce("commit-failed", `git commit failed: ${firstLine(commit.stderr || commit.stdout)}`);
+      warnOnce(
+        "commit-failed",
+        `git commit failed: ${firstLine(commit.stderr || commit.stdout)}`,
+      );
       return false;
     }
     const upstream = await hasUpstream(root);
-    const push = await git(upstream ? ["push"] : ["push", "-u", "origin", branch], root);
+    const push = await git(
+      upstream ? ["push"] : ["push", "-u", "origin", branch],
+      root,
+    );
     if (push.code !== 0) {
-      warnOnce("push-failed", `push failed: ${firstLine(push.stderr || push.stdout)}`);
+      warnOnce(
+        "push-failed",
+        `push failed: ${firstLine(push.stderr || push.stdout)}`,
+      );
       return false;
     }
     markSync("commit");
@@ -248,7 +280,10 @@ export function createSyncer(options: SyncerOptions): Syncer {
       return;
     }
     if (!(await hasUpstream(root))) {
-      warnOnce("no-upstream", `branch '${branch}' has no upstream; auto sync skipped`);
+      warnOnce(
+        "no-upstream",
+        `branch '${branch}' has no upstream; auto sync skipped`,
+      );
       return;
     }
     const fetch = await git(["fetch", "origin"], root);
@@ -258,7 +293,10 @@ export function createSyncer(options: SyncerOptions): Syncer {
     if (ahead === null || behind === null) return;
 
     if (ahead > 0 && behind > 0) {
-      warnOnce("diverged", `local branch diverged from origin/${branch}; resolve manually`);
+      warnOnce(
+        "diverged",
+        `local branch diverged from origin/${branch}; resolve manually`,
+      );
       return;
     }
     if (ahead > 0) {
@@ -267,7 +305,10 @@ export function createSyncer(options: SyncerOptions): Syncer {
         markSync("commit");
         notify("info", `git-syncher: pushed ${ahead} pending commit(s)`);
       } else {
-        warnOnce("push-failed", `push failed: ${firstLine(push.stderr || push.stdout)}`);
+        warnOnce(
+          "push-failed",
+          `push failed: ${firstLine(push.stderr || push.stdout)}`,
+        );
       }
       return;
     }
@@ -275,9 +316,15 @@ export function createSyncer(options: SyncerOptions): Syncer {
       const pull = await git(["pull", "--ff-only"], root);
       if (pull.code === 0) {
         markSync("pull");
-        notify("info", `git-syncher: pulled ${behind} new commit(s) from origin/${branch}`);
+        notify(
+          "info",
+          `git-syncher: pulled ${behind} new commit(s) from origin/${branch}`,
+        );
       } else {
-        warnOnce("pull-failed", `pull failed: ${firstLine(pull.stderr || pull.stdout)}`);
+        warnOnce(
+          "pull-failed",
+          `pull failed: ${firstLine(pull.stderr || pull.stdout)}`,
+        );
       }
     }
   }
@@ -334,7 +381,10 @@ export function createSyncer(options: SyncerOptions): Syncer {
     if (!config.enabled) return;
     const branch = await currentBranch(root);
     if (!branch) return; // detached HEAD: leave the repo alone
-    const statusRes = await git(["-c", "core.quotePath=false", "status", "--porcelain"], root);
+    const statusRes = await git(
+      ["-c", "core.quotePath=false", "status", "--porcelain"],
+      root,
+    );
     if (statusRes.code !== 0) return;
 
     if (statusRes.stdout.trim()) {
@@ -345,7 +395,9 @@ export function createSyncer(options: SyncerOptions): Syncer {
         state.snapshot = snap;
       }
       if (t - state.dirtySince >= debounceMs && isIdle()) {
-        const files = statusRes.stdout.split("\n").filter((l) => l.trim()).length;
+        const files = statusRes.stdout
+          .split("\n")
+          .filter((l) => l.trim()).length;
         if (await commitAndPush(root, branch, files)) {
           state.dirtySince = null;
           state.snapshot = null;
@@ -359,7 +411,9 @@ export function createSyncer(options: SyncerOptions): Syncer {
     await syncCleanTree(root, branch);
   }
 
-  async function toggle(): Promise<{ root: string; enabled: boolean } | { error: string }> {
+  async function toggle(): Promise<
+    { root: string; enabled: boolean } | { error: string }
+  > {
     const root = await repoRoot();
     if (!root) return { error: "not a git repository" };
     const { config } = loadConfig(root);
@@ -378,7 +432,10 @@ export function createSyncer(options: SyncerOptions): Syncer {
     if (!root) return { error: "not a git repository" };
     const { config, exists } = loadConfig(root);
     const branch = await currentBranch(root);
-    const upstreamRes = await git(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], root);
+    const upstreamRes = await git(
+      ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+      root,
+    );
     return {
       root,
       enabled: config.enabled,
