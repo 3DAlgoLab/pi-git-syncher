@@ -1,0 +1,30 @@
+{
+  "name": "pi-git-syncher",
+  "version": "0.1.0",
+  "description": "pi extension: debounced automatic git commit & push and automatic pull, per repo, toggled with /git-sync",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "git",
+    "auto-commit",
+    "sync"
+  ],
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/*.test.ts",
+    "check": "tsc --noEmit"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.85.1",
+    "@types/node": "^24.0.0",
+    "typescript": "^5.5.0"
+  }
+}

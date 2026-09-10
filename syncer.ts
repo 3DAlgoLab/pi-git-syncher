@@ -1,0 +1,408 @@
+/**
+ * Pi Git Syncher — core engine.
+ *
+ * Tracks one git repository (the toplevel of `getCwd()`) and performs:
+ *
+ * - Automatic commit & push: while the working tree is dirty, a 30-minute
+ *   debounce clock runs. Any new change (fingerprint change of the dirty
+ *   state) restarts the clock. When the clock expires and pi is idle,
+ *   the engine runs `git add -A`, commits, and pushes.
+ * - Automatic retrieving: while the working tree is clean, the engine
+ *   fetches and, if the remote is ahead, runs `git pull --ff-only`.
+ *   Pending local commits are pushed first (e.g. after a failed push).
+ *
+ * The engine is transport-agnostic: git access goes through an injected
+ * runner, time through an injected clock, so it is fully unit-testable.
+ */
+
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
+import { join } from "node:path";
+
+export const CONFIG_FILE = ".git-syncher.json";
+export const DEFAULT_POLLING_MINUTES = 1;
+export const DEFAULT_DEBOUNCE_MS = 30 * 60 * 1000;
+export const COMMIT_PREFIX = "chore(git-syncher)";
+
+const MAX_POLLING_MINUTES = 1440;
+
+export interface GitResult {
+  code: number;
+  stdout: string;
+  stderr: string;
+}
+
+/** Runs `git <args>` in `cwd`. */
+export type GitRunner = (args: string[], cwd: string) => Promise<GitResult>;
+
+export interface GitSyncherConfig {
+  /** Master switch for all features. Default: true. */
+  enabled: boolean;
+  /** Minutes between polls. Default: 1. */
+  pollingIntervalMinutes: number;
+}
+
+export interface SyncerOptions {
+  run: GitRunner;
+  /** Directory the session runs in; its containing repo is the synced one. */
+  getCwd: () => string;
+  now?: () => number;
+  isIdle?: () => boolean;
+  notify?: (type: "info" | "warning" | "error", message: string) => void;
+  debounceMs?: number;
+}
+
+export interface SyncerState {
+  /** Repo root of the current cwd, or null when not inside a repo. */
+  root: string | null;
+  /** When the current unchanging-dirty streak started, or null. */
+  dirtySince: number | null;
+  /** Fingerprint of the dirty state when `dirtySince` was (re)set. */
+  snapshot: string | null;
+  /** Whether the config file was added to .git/info/exclude this session. */
+  excludedConfig: boolean;
+  /** One-shot warnings already reported this session. */
+  warned: Set<string>;
+  lastSyncAt: number | null;
+  lastSyncKind: "commit" | "pull" | null;
+}
+
+export interface SyncerStatus {
+  root: string;
+  enabled: boolean;
+  configPath: string;
+  configExists: boolean;
+  pollingIntervalMinutes: number;
+  branch: string | null;
+  upstream: string | null;
+  remote: string | null;
+  dirty: boolean;
+  dirtySince: number | null;
+  debounceMs: number;
+  lastSyncAt: number | null;
+  lastSyncKind: "commit" | "pull" | null;
+}
+
+export interface Syncer {
+  readonly state: SyncerState;
+  /** One poll cycle. Errors are reported via notify/log, never thrown. */
+  tick(): Promise<void>;
+  /** Flips `enabled` in the config file (created if missing). */
+  toggle(): Promise<{ root: string; enabled: boolean } | { error: string }>;
+  status(): Promise<SyncerStatus | { error: string }>;
+}
+
+/** Parses a raw config value; invalid fields fall back to defaults. */
+export function parseConfig(raw: unknown): GitSyncherConfig {
+  const config: GitSyncherConfig = {
+    enabled: true,
+    pollingIntervalMinutes: DEFAULT_POLLING_MINUTES,
+  };
+  if (raw && typeof raw === "object") {
+    const obj = raw as Record<string, unknown>;
+    if (typeof obj.enabled === "boolean") config.enabled = obj.enabled;
+    if (
+      typeof obj.pollingIntervalMinutes === "number" &&
+      Number.isFinite(obj.pollingIntervalMinutes) &&
+      obj.pollingIntervalMinutes > 0
+    ) {
+      config.pollingIntervalMinutes = Math.min(obj.pollingIntervalMinutes, MAX_POLLING_MINUTES);
+    }
+  }
+  return config;
+}
+
+export function loadConfig(root: string): { config: GitSyncherConfig; exists: boolean } {
+  try {
+    const raw = readFileSync(join(root, CONFIG_FILE), "utf8");
+    return { config: parseConfig(JSON.parse(raw)), exists: true };
+  } catch {
+    return { config: parseConfig(null), exists: false };
+  }
+}
+
+export function saveConfig(root: string, config: GitSyncherConfig): void {
+  writeFileSync(join(root, CONFIG_FILE), `${JSON.stringify(config, null, 2)}\n`, "utf8");
+}
+
+export function createSyncer(options: SyncerOptions): Syncer {
+  const run = options.run;
+  const now = options.now ?? Date.now;
+  const isIdle = options.isIdle ?? (() => true);
+  const notify = options.notify ?? (() => {});
+  const debounceMs = options.debounceMs ?? DEFAULT_DEBOUNCE_MS;
+
+  const state: SyncerState = {
+    root: null,
+    dirtySince: null,
+    snapshot: null,
+    excludedConfig: false,
+    warned: new Set(),
+    lastSyncAt: null,
+    lastSyncKind: null,
+  };
+
+  const git = (args: string[], cwd: string): Promise<GitResult> => run(args, cwd);
+
+  function warnOnce(key: string, message: string): void {
+    if (state.warned.has(key)) return;
+    state.warned.add(key);
+    notify("warning", `git-syncher: ${message}`);
+  }
+
+  function markSync(kind: "commit" | "pull"): void {
+    state.lastSyncAt = now();
+    state.lastSyncKind = kind;
+  }
+
+  async function repoRoot(): Promise<string | null> {
+    const res = await git(["rev-parse", "--show-toplevel"], options.getCwd());
+    const root = res.stdout.trim();
+    return res.code === 0 && root ? root : null;
+  }
+
+  /** Current branch name, or null when detached. */
+  async function currentBranch(root: string): Promise<string | null> {
+    const res = await git(["symbolic-ref", "--quiet", "--short", "HEAD"], root);
+    return res.code === 0 ? res.stdout.trim() || null : null;
+  }
+
+  async function remoteUrl(root: string): Promise<string | null> {
+    const res = await git(["remote", "get-url", "origin"], root);
+    return res.code === 0 ? res.stdout.trim() || null : null;
+  }
+
+  /**
+   * Keeps the config file out of dirty detection when it is untracked:
+   * adds it to the repo-local .git/info/exclude (no tracked file touched).
+   * If the user commits the config deliberately, exclude has no effect and
+   * normal tracking applies.
+   */
+  async function ensureConfigExcluded(root: string): Promise<void> {
+    if (state.excludedConfig) return;
+    try {
+      const gitDirRes = await git(["rev-parse", "--absolute-git-dir"], root);
+      if (gitDirRes.code !== 0) return;
+      const excludePath = join(gitDirRes.stdout.trim(), "info", "exclude");
+      mkdirSync(join(gitDirRes.stdout.trim(), "info"), { recursive: true });
+      const current = existsSync(excludePath) ? readFileSync(excludePath, "utf8") : "";
+      if (!current.split("\n").includes(CONFIG_FILE)) {
+        appendFileSync(excludePath, `${CONFIG_FILE}\n`, "utf8");
+      }
+      state.excludedConfig = true;
+    } catch {
+      // Best effort: non-standard git layouts (rare) just keep normal behavior.
+    }
+  }
+  async function hasUpstream(root: string): Promise<boolean> {
+    const res = await git(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], root);
+    return res.code === 0;
+  }
+
+  async function revCount(root: string, range: string): Promise<number | null> {
+    const res = await git(["rev-list", "--count", range], root);
+    if (res.code !== 0) return null;
+    const n = parseInt(res.stdout.trim(), 10);
+    return Number.isFinite(n) ? n : 0;
+  }
+
+  async function commitAndPush(root: string, branch: string, fileCount: number): Promise<boolean> {
+    const remote = await remoteUrl(root);
+    if (!remote) {
+      warnOnce("no-remote", "no remote 'origin'; commit & push skipped");
+      return false;
+    }
+    const message = `${COMMIT_PREFIX}: auto-commit ${fileCount} file(s), ${new Date(now()).toISOString()}`;
+    const add = await git(["add", "-A"], root);
+    if (add.code !== 0) {
+      warnOnce("add-failed", `git add failed: ${firstLine(add.stderr || add.stdout)}`);
+      return false;
+    }
+    const commit = await git(["commit", "-m", message], root);
+    if (commit.code !== 0) {
+      warnOnce("commit-failed", `git commit failed: ${firstLine(commit.stderr || commit.stdout)}`);
+      return false;
+    }
+    const upstream = await hasUpstream(root);
+    const push = await git(upstream ? ["push"] : ["push", "-u", "origin", branch], root);
+    if (push.code !== 0) {
+      warnOnce("push-failed", `push failed: ${firstLine(push.stderr || push.stdout)}`);
+      return false;
+    }
+    markSync("commit");
+    notify("info", `git-syncher: committed & pushed ${fileCount} file(s)`);
+    return true;
+  }
+
+  /** For a clean tree: push pending local commits, then ff-only pull if behind. */
+  async function syncCleanTree(root: string, branch: string): Promise<void> {
+    const remote = await remoteUrl(root);
+    if (!remote) {
+      warnOnce("no-remote", "no remote 'origin'; auto sync skipped");
+      return;
+    }
+    if (!(await hasUpstream(root))) {
+      warnOnce("no-upstream", `branch '${branch}' has no upstream; auto sync skipped`);
+      return;
+    }
+    const fetch = await git(["fetch", "origin"], root);
+    if (fetch.code !== 0) return; // offline or transient; retry on the next poll
+    const ahead = await revCount(root, "@{u}..HEAD");
+    const behind = await revCount(root, "HEAD..@{u}");
+    if (ahead === null || behind === null) return;
+
+    if (ahead > 0 && behind > 0) {
+      warnOnce("diverged", `local branch diverged from origin/${branch}; resolve manually`);
+      return;
+    }
+    if (ahead > 0) {
+      const push = await git(["push"], root);
+      if (push.code === 0) {
+        markSync("commit");
+        notify("info", `git-syncher: pushed ${ahead} pending commit(s)`);
+      } else {
+        warnOnce("push-failed", `push failed: ${firstLine(push.stderr || push.stdout)}`);
+      }
+      return;
+    }
+    if (behind > 0) {
+      const pull = await git(["pull", "--ff-only"], root);
+      if (pull.code === 0) {
+        markSync("pull");
+        notify("info", `git-syncher: pulled ${behind} new commit(s) from origin/${branch}`);
+      } else {
+        warnOnce("pull-failed", `pull failed: ${firstLine(pull.stderr || pull.stdout)}`);
+      }
+    }
+  }
+
+  /**
+   * Fingerprint of the dirty state: HEAD plus each dirty path with its
+   * mtime. Repeated edits to the same file change the mtime, so they reset
+   * the debounce clock even though the porcelain output looks identical.
+   */
+  async function fingerprint(root: string, status: string): Promise<string> {
+    const head = await git(["rev-parse", "HEAD"], root);
+    const parts: string[] = [head.code === 0 ? head.stdout.trim() : "?"];
+    for (const line of status.split("\n")) {
+      if (!line.trim()) continue;
+      const path = porcelainPath(line);
+      if (!path) continue;
+      let mtime = "?";
+      try {
+        mtime = String(statSync(join(root, path)).mtimeMs);
+      } catch {
+        // Path vanished between `status` and `stat`; the status line will
+        // change on the next poll anyway.
+      }
+      parts.push(`${path}@${mtime}`);
+    }
+    return parts.join("|");
+  }
+
+  /** Extracts the (destination) path from one porcelain status line. */
+  function porcelainPath(line: string): string | null {
+    const rest = line.slice(3).trim();
+    if (!rest) return null;
+    const arrow = rest.indexOf(" -> ");
+    const target = arrow >= 0 ? rest.slice(arrow + 4) : rest;
+    if (target.length >= 2 && target.startsWith('"') && target.endsWith('"')) {
+      try {
+        return JSON.parse(target);
+      } catch {
+        return target.slice(1, -1);
+      }
+    }
+    return target;
+  }
+
+  async function tick(): Promise<void> {
+    const root = await repoRoot();
+    if (!root) {
+      state.root = null;
+      return;
+    }
+    state.root = root;
+    const { config, exists } = loadConfig(root);
+    if (exists && !state.excludedConfig) await ensureConfigExcluded(root);
+    if (!config.enabled) return;
+    const branch = await currentBranch(root);
+    if (!branch) return; // detached HEAD: leave the repo alone
+    const statusRes = await git(["-c", "core.quotePath=false", "status", "--porcelain"], root);
+    if (statusRes.code !== 0) return;
+
+    if (statusRes.stdout.trim()) {
+      const t = now();
+      const snap = await fingerprint(root, statusRes.stdout);
+      if (state.dirtySince === null || snap !== state.snapshot) {
+        state.dirtySince = t;
+        state.snapshot = snap;
+      }
+      if (t - state.dirtySince >= debounceMs && isIdle()) {
+        const files = statusRes.stdout.split("\n").filter((l) => l.trim()).length;
+        if (await commitAndPush(root, branch, files)) {
+          state.dirtySince = null;
+          state.snapshot = null;
+        }
+      }
+      return;
+    }
+
+    state.dirtySince = null;
+    state.snapshot = null;
+    await syncCleanTree(root, branch);
+  }
+
+  async function toggle(): Promise<{ root: string; enabled: boolean } | { error: string }> {
+    const root = await repoRoot();
+    if (!root) return { error: "not a git repository" };
+    const { config } = loadConfig(root);
+    const next = { ...config, enabled: !config.enabled };
+    saveConfig(root, next);
+    await ensureConfigExcluded(root);
+    // Re-enabling starts a fresh debounce clock.
+    state.dirtySince = null;
+    state.snapshot = null;
+    state.warned.clear();
+    return { root, enabled: next.enabled };
+  }
+
+  async function status(): Promise<SyncerStatus | { error: string }> {
+    const root = await repoRoot();
+    if (!root) return { error: "not a git repository" };
+    const { config, exists } = loadConfig(root);
+    const branch = await currentBranch(root);
+    const upstreamRes = await git(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], root);
+    return {
+      root,
+      enabled: config.enabled,
+      configPath: join(root, CONFIG_FILE),
+      configExists: exists,
+      pollingIntervalMinutes: config.pollingIntervalMinutes,
+      branch,
+      upstream: upstreamRes.code === 0 ? upstreamRes.stdout.trim() : null,
+      remote: await remoteUrl(root),
+      dirty: state.dirtySince !== null,
+      dirtySince: state.dirtySince,
+      debounceMs,
+      lastSyncAt: state.lastSyncAt,
+      lastSyncKind: state.lastSyncKind,
+    };
+  }
+
+  return { state, tick, toggle, status };
+}
+
+function firstLine(text: string): string {
+  const line = text
+    .trim()
+    .split("\n")
+    .find((l) => l.trim());
+  return line ? line.trim().slice(0, 200) : "unknown error";
+}
