@@ -319,43 +319,37 @@ test("config file: an untracked .git-syncher.json does not make the repo dirty",
   assert.ok(f.notes.some((n) => n.message.includes("pulled 1 new commit")));
 });
 
-test(
-  "opt-in: without a config file the repo is left alone; the first /git-sync enables it",
-  async (t) => {
-    const f = await makeFixture(t, { config: false });
+test("opt-in: without a config file the repo is left alone; the first /git-sync enables it", async (t) => {
+  const f = await makeFixture(t, { config: false });
 
-    // Opted out: 31 quiet minutes on a dirty tree commit nothing.
-    await writeFile(join(f.repo, "local.txt"), "x\n");
-    await f.syncer.tick();
-    advance(f, 31);
-    await f.syncer.tick();
-    assert.equal(
-      await sh(f.run, ["log", "-1", "--format=%s"], f.repo),
-      "init",
-    );
+  // Opted out: 31 quiet minutes on a dirty tree commit nothing.
+  await writeFile(join(f.repo, "local.txt"), "x\n");
+  await f.syncer.tick();
+  advance(f, 31);
+  await f.syncer.tick();
+  assert.equal(await sh(f.run, ["log", "-1", "--format=%s"], f.repo), "init");
 
-    // Opted out: with a clean tree, a pending remote commit is not pulled.
-    await rm(join(f.repo, "local.txt"));
-    await pushRemoteCommit(f, "remote.txt", "from remote\n");
-    await f.syncer.tick();
-    assert.equal(await exists(join(f.repo, "remote.txt")), false);
+  // Opted out: with a clean tree, a pending remote commit is not pulled.
+  await rm(join(f.repo, "local.txt"));
+  await pushRemoteCommit(f, "remote.txt", "from remote\n");
+  await f.syncer.tick();
+  assert.equal(await exists(join(f.repo, "remote.txt")), false);
 
-    // First toggle opts in: creates the enabled config file.
-    const res = await f.syncer.toggle();
-    if ("error" in res) throw new Error(res.error);
-    assert.equal(res.enabled, true);
-    assert.ok(
-      (await readFile(join(f.repo, CONFIG_FILE), "utf8")).includes(
-        '"enabled": true',
-      ),
-    );
+  // First toggle opts in: creates the enabled config file.
+  const res = await f.syncer.toggle();
+  if ("error" in res) throw new Error(res.error);
+  assert.equal(res.enabled, true);
+  assert.ok(
+    (await readFile(join(f.repo, CONFIG_FILE), "utf8")).includes(
+      '"enabled": true',
+    ),
+  );
 
-    // Now the same pending remote commit is pulled on the next tick.
-    await f.syncer.tick();
-    assert.equal(await exists(join(f.repo, "remote.txt")), true);
-    assert.equal(
-      await ref(f.run, f.repo, "HEAD"),
-      await ref(f.run, f.remote, "main"),
-    );
-  },
-);
+  // Now the same pending remote commit is pulled on the next tick.
+  await f.syncer.tick();
+  assert.equal(await exists(join(f.repo, "remote.txt")), true);
+  assert.equal(
+    await ref(f.run, f.repo, "HEAD"),
+    await ref(f.run, f.remote, "main"),
+  );
+});
