@@ -9,7 +9,7 @@ A [pi](https://pi.dev) coding-agent extension that keeps your git repo in sync w
 ## Install
 
 ```bash
-pi install /path/to/pi-git-syncher        # or: pi install git:github.com/<you>/pi-git-syncher
+pi install git:github.com/3DAlgoLab/pi-git-syncher        
 ```
 
 or copy the repo into `~/.pi/agent/extensions/` (global) / `.pi/extensions/` (project). The extension loads in any pi session, regardless of directory.
@@ -34,10 +34,10 @@ The features are **opt-in per repo**: while `.git-syncher.json` does not exist, 
 }
 ```
 
-| Key | Default | Meaning |
-|-----|---------|---------|
-| `enabled` | `true` | Master switch for both features (no per-feature toggles). |
-| `pollingIntervalMinutes` | `1` | Polling interval in minutes (must be > 0, capped at 1440). |
+| Key                      | Default | Meaning                                                    |
+| ------------------------ | ------- | ---------------------------------------------------------- |
+| `enabled`                | `true`  | Master switch for both features (no per-feature toggles).  |
+| `pollingIntervalMinutes` | `1`     | Polling interval in minutes (must be > 0, capped at 1440). |
 
 The 30-minute debounce is fixed by design.
 
