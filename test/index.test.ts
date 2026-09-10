@@ -23,7 +23,9 @@ interface FakePi {
       handler: (args: string, ctx: FakeCtx) => Promise<void>;
     }
   >;
+  sentMessages: Array<{ content: string; options?: unknown }>;
 }
+
 
 interface FakeCtx {
   cwd: string;
@@ -42,6 +44,7 @@ function makeFakePi(
 ): FakePi {
   const handlers: FakePi["handlers"] = {};
   const commands: FakePi["commands"] = {};
+  const sentMessages: FakePi["sentMessages"] = [];
   const pi = {
     on: (event: string, handler: (event: unknown, ctx: FakeCtx) => void) => {
       (handlers[event] ??= []).push(handler);
@@ -53,8 +56,11 @@ function makeFakePi(
       const res = await run(args, options?.cwd ?? process.cwd());
       return { ...res, killed: false };
     },
+    sendMessage: (msg: { content: string }, options?: unknown) => {
+      sentMessages.push({ content: msg.content, options });
+    },
   } as unknown as ExtensionAPI;
-  return { pi, handlers, commands };
+  return { pi, handlers, commands, sentMessages };
 }
 
 function makeCtx(cwd: string): FakeCtx {
@@ -194,4 +200,34 @@ test("extension: /git-sync outside a git repo reports an error", async (t) => {
   );
   await commands["git-sync"].handler("status", ctx);
   assert.ok(ctx.notes.filter((n) => n.type === "error").length >= 2);
+});
+
+test("extension: a diverged branch induces the agent via sendMessage", async (t) => {
+  const f = await makeFixture(t);
+  const { pi, handlers, sentMessages } = makeFakePi(f.run);
+  const ctx = makeCtx(f.repo);
+  await writeFile(
+    join(f.repo, CONFIG_FILE),
+    JSON.stringify({ pollingIntervalMinutes: 0.05 }),
+    "utf8",
+  );
+
+  // Diverge: one local commit + one remote commit.
+  await pushRemoteCommit(f, "remote.txt", "r\n");
+  await f.run(["commit", "--allow-empty", "-m", "local"], f.repo);
+
+  extension(pi);
+  for (const h of handlers["session_start"] ?? []) h({}, ctx);
+
+  // The first tick is immediate: divergence should induce the agent.
+  await waitFor(() => sentMessages.length >= 1, 30_000);
+  const [msg] = sentMessages;
+  assert.ok(msg.content.includes("git merge origin/main"), msg.content);
+  assert.deepEqual(msg.options, { triggerTurn: true, deliverAs: "followUp" });
+
+  // Same episode: no repeated induction within the window.
+  await new Promise((r) => setTimeout(r, 6_500));
+  assert.equal(sentMessages.length, 1);
+
+  for (const h of handlers["session_shutdown"] ?? []) h({}, ctx);
 });

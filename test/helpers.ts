@@ -79,6 +79,8 @@ export interface Fixture {
   run: GitRunner;
   clock: { now: number };
   notes: Note[];
+  /** Instructions the syncer handed to the (fake) agent. */
+  induced: string[];
   syncer: Syncer;
   setIdle(v: boolean): void;
   /** Creates a second clone of the remote in the fixture dir. */
@@ -120,12 +122,14 @@ export async function makeFixture(
   let idle = true;
   let cloneCount = 0;
   const notes: Note[] = [];
+  const induced: string[] = [];
   const syncer = createSyncerForFixture({
     run,
     cwd: repo,
     clock,
     idle: () => idle,
     notes,
+    induce: (s) => induced.push(s),
   });
 
   return {
@@ -135,6 +139,7 @@ export async function makeFixture(
     run,
     clock,
     notes,
+    induced,
     syncer,
     setIdle: (v) => {
       idle = v;
@@ -153,6 +158,7 @@ function createSyncerForFixture(opts: {
   clock: { now: number };
   idle: () => boolean;
   notes: Note[];
+  induce?: (s: string) => void;
 }): Syncer {
   return createSyncer({
     run: opts.run,
@@ -161,6 +167,7 @@ function createSyncerForFixture(opts: {
     isIdle: opts.idle,
     notify: (type, message) => opts.notes.push({ type, message }),
     debounceMs: DEBOUNCE,
+    induce: opts.induce,
   });
 }
 

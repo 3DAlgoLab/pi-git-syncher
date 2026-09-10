@@ -353,3 +353,86 @@ test("opt-in: without a config file the repo is left alone; the first /git-sync 
     await ref(f.run, f.remote, "main"),
   );
 });
+
+test("diverged: induces the agent once per episode", async (t) => {
+  const f = await makeFixture(t);
+  await pushRemoteCommit(f, "remote.txt", "r\n");
+  await sh(f.run, ["commit", "--allow-empty", "-m", "local"], f.repo);
+  await f.syncer.tick();
+  assert.equal(f.induced.length, 1);
+  assert.ok(f.induced[0].includes("git merge origin/main"));
+  assert.ok(
+    f.induced[0].includes("1 commit(s) ahead and 1 commit(s) behind"),
+  );
+
+  // Same episode on the next tick: no second induction.
+  await f.syncer.tick();
+  assert.equal(f.induced.length, 1);
+});
+
+test("diverged: a resolved episode re-arms the induction", async (t) => {
+  const f = await makeFixture(t);
+  await pushRemoteCommit(f, "remote.txt", "r\n");
+  await sh(f.run, ["commit", "--allow-empty", "-m", "local"], f.repo);
+  await f.syncer.tick();
+  assert.equal(f.induced.length, 1);
+
+  // The agent resolves: merge + push.
+  await sh(f.run, ["merge", "origin/main", "--no-edit"], f.repo);
+  await sh(f.run, ["push"], f.repo);
+  await f.syncer.tick(); // clean + up to date: re-arms
+
+  // A fresh divergence with the same counts induces again.
+  await pushRemoteCommit(f, "remote2.txt", "r2\n");
+  await sh(f.run, ["commit", "--allow-empty", "-m", "local2"], f.repo);
+  await f.syncer.tick();
+  assert.equal(f.induced.length, 2);
+});
+
+test("merge in progress: a conflicted merge is never auto-committed", async (t) => {
+  const f = await makeFixture(t);
+  await writeFile(join(f.repo, "README.md"), "local edit\n");
+  await sh(f.run, ["add", "-A"], f.repo);
+  await sh(f.run, ["commit", "-m", "local"], f.repo);
+
+  const other = await f.otherClone();
+  await writeFile(join(other, "README.md"), "remote edit\n");
+  await sh(f.run, ["add", "-A"], other);
+  await sh(
+    f.run,
+    [
+      "-c",
+      "user.email=other@test.local",
+      "-c",
+      "user.name=Other",
+      "commit",
+      "-m",
+      "remote",
+    ],
+    other,
+  );
+  await sh(f.run, ["push"], other);
+
+  // Start the merge: it conflicts, MERGE_HEAD is set, tree is dirty.
+  await sh(f.run, ["fetch", "origin"], f.repo);
+  const merge = await f.run(["merge", "origin/main"], f.repo);
+  assert.notEqual(merge.code, 0, "expected a conflict");
+  assert.equal(
+    await sh(
+      f.run,
+      ["rev-parse", "-q", "--verify", "MERGE_HEAD"],
+      f.repo,
+    ),
+    await ref(f.run, f.remote, "main"),
+    "merge in progress",
+  );
+
+  // 31 quiet minutes do not commit the conflicted state.
+  advance(f, 31);
+  await f.syncer.tick();
+  assert.equal(
+    await sh(f.run, ["log", "-1", "--format=%s"], f.repo),
+    "local",
+    "no auto-commit while a merge is in progress",
+  );
+});

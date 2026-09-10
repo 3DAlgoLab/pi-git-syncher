@@ -42,6 +42,28 @@ export default function (pi: ExtensionAPI) {
       notify: (type, message) => {
         if (ctx?.hasUI) ctx.ui.notify(message, type);
       },
+      induce: (instruction) => {
+        // A custom session message that triggers an agent turn (queued as a
+        // follow-up, so it never interrupts in-flight tool calls).
+        try {
+          pi.sendMessage(
+            {
+              customType: "pi-git-syncher",
+              content: instruction,
+              display: true,
+            },
+            { triggerTurn: true, deliverAs: "followUp" },
+          );
+        } catch (err) {
+          // Injection not supported in this mode; the divergence warning
+          // already reached the user.
+          if (ctx?.hasUI)
+            ctx.ui.notify(
+              `git-syncher: could not request agent resolution: ${err instanceof Error ? err.message : String(err)}`,
+              "error",
+            );
+        }
+      },
     });
     return syncer;
   }

@@ -15,6 +15,7 @@ Automatic retrieving
 
 - Check the remote repo is changed every 1 minute, if is changed, do `git pull`.
 - If local repo is changed, don't need to do it. Automatic commit & push feature would handle it.
+- If local and remote diverged (push rejected), never auto-merge — ask the agent (the running pi session) to resolve it: `git merge origin/<branch>` (resolving conflicts if any), then push. One request per divergence episode. While a merge is in progress, never auto-commit the conflicted state.
 
 Minimize interfere with user or tool actions. Do it silently.
 

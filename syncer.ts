@@ -56,6 +56,12 @@ export interface SyncerOptions {
   isIdle?: () => boolean;
   notify?: (type: "info" | "warning" | "error", message: string) => void;
   debounceMs?: number;
+  /**
+   * Called when the local branch has diverged from its upstream, with an
+   * instruction to hand to the running agent (merge + push). The syncher
+   * itself never merges a diverged branch.
+   */
+  induce?: (instruction: string) => void | Promise<void>;
 }
 
 export interface SyncerState {
@@ -69,6 +75,12 @@ export interface SyncerState {
   excludedConfig: boolean;
   /** One-shot warnings already reported this session. */
   warned: Set<string>;
+  /**
+   * 'branch:ahead:behind' key of the divergence episode for which the agent
+   * was already induced; null when no episode is active. A different key
+   * (or a fresh divergence after resolution) induces again.
+   */
+  inducedDivergence: string | null;
   lastSyncAt: number | null;
   lastSyncKind: "commit" | "pull" | null;
 }
@@ -141,12 +153,34 @@ export function saveConfig(root: string, config: GitSyncherConfig): void {
   );
 }
 
+/**
+ * Instruction handed to the running agent when the branch has diverged.
+ * Deliberately prescribes a merge (never a rebase/force-push): the local
+ * commits are usually already pushed-then-rejected and may be shared.
+ */
+export function divergenceInstruction(
+  branch: string,
+  ahead: number,
+  behind: number,
+): string {
+  return [
+    "[pi-git-syncher] This repo's local branch has diverged from its remote (a push was rejected, non-fast-forward).",
+    `Branch '${branch}' is ${ahead} commit(s) ahead and ${behind} commit(s) behind origin/${branch}.`,
+    "Resolve the git sync now:",
+    "1. git fetch origin",
+    `2. git merge origin/${branch} — if there are conflicts, edit the conflicted files to combine both sides, then git add and git commit`,
+    "3. git push",
+    "Do not rewrite shared history (no rebase, no force-push). If the merge cannot be resolved safely, stop and report the conflicts.",
+  ].join("\n");
+}
+
 export function createSyncer(options: SyncerOptions): Syncer {
   const run = options.run;
   const now = options.now ?? Date.now;
   const isIdle = options.isIdle ?? (() => true);
   const notify = options.notify ?? (() => {});
   const debounceMs = options.debounceMs ?? DEFAULT_DEBOUNCE_MS;
+  const induce = options.induce;
 
   const state: SyncerState = {
     root: null,
@@ -154,6 +188,7 @@ export function createSyncer(options: SyncerOptions): Syncer {
     snapshot: null,
     excludedConfig: false,
     warned: new Set(),
+    inducedDivergence: null,
     lastSyncAt: null,
     lastSyncKind: null,
   };
@@ -295,10 +330,20 @@ export function createSyncer(options: SyncerOptions): Syncer {
     if (ahead > 0 && behind > 0) {
       warnOnce(
         "diverged",
-        `local branch diverged from origin/${branch}; resolve manually`,
+        `local branch diverged from origin/${branch}; ${
+          induce ? "asked the agent to resolve" : "resolve manually"
+        }`,
       );
+      // One agent induction per divergence episode (same branch + counts).
+      const key = `${branch}:${ahead}:${behind}`;
+      if (induce && state.inducedDivergence !== key) {
+        state.inducedDivergence = key;
+        await induce(divergenceInstruction(branch, ahead, behind));
+      }
       return;
     }
+    // Not diverged: re-arm the induction for a future episode.
+    state.inducedDivergence = null;
     if (ahead > 0) {
       const push = await git(["push"], root);
       if (push.code === 0) {
@@ -396,6 +441,14 @@ export function createSyncer(options: SyncerOptions): Syncer {
         state.snapshot = snap;
       }
       if (t - state.dirtySince >= debounceMs && isIdle()) {
+        // A merge in progress (e.g. the agent resolving a divergence) must
+        // not be auto-committed: `add -A` + `commit` would bake conflict
+        // markers into history.
+        const mergeHead = await git(
+          ["rev-parse", "-q", "--verify", "MERGE_HEAD"],
+          root,
+        );
+        if (mergeHead.code === 0) return;
         const files = statusRes.stdout
           .split("\n")
           .filter((l) => l.trim()).length;
