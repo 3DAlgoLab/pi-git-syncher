@@ -4,11 +4,12 @@
  */
 
 import { execFile } from "node:child_process";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { access, mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { devNull, tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   createSyncer,
+  saveConfig,
   type GitRunner,
   type GitResult,
   type Syncer,
@@ -86,7 +87,7 @@ export interface Fixture {
 
 export async function makeFixture(
   t: { after(fn: () => Promise<void> | void): void },
-  opts: { remote?: boolean } = {},
+  opts: { remote?: boolean; config?: boolean } = {},
 ): Promise<Fixture> {
   const run = makeRun();
   const dir = await mkdtemp(join(tmpdir(), "pi-git-syncher-"));
@@ -110,6 +111,11 @@ export async function makeFixture(
     await sh(run, ["push", "-u", "origin", "main"], repo);
   }
 
+  // Opt-in fixture default: an enabled config file exists. Tests that
+  // verify the opt-out path pass { config: false }.
+  if (opts.config !== false) {
+    saveConfig(repo, { enabled: true, pollingIntervalMinutes: 1 });
+  }
   const clock = { now: Date.now() };
   let idle = true;
   let cloneCount = 0;
@@ -161,6 +167,15 @@ function createSyncerForFixture(opts: {
 /** Advances the fixture clock by n minutes. */
 export function advance(f: Fixture, minutes: number): void {
   f.clock.now += minutes * MIN;
+}
+
+export async function exists(path: string): Promise<boolean> {
+  try {
+    await access(path);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** Pushes a new commit to the remote using a second clone. */

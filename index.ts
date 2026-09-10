@@ -132,6 +132,6 @@ function formatStatus(st: SyncerStatus): string {
     `last:   ${st.lastSyncAt ? `${st.lastSyncKind} at ${new Date(st.lastSyncAt).toISOString()}` : "never"}`,
   ];
   if (!st.configExists)
-    lines.push(`config: ${CONFIG_FILE} not found (using defaults)`);
+    lines.push(`config: ${CONFIG_FILE} not found — run /git-sync to enable`);
   return lines.join("\n");
 }

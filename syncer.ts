@@ -378,7 +378,8 @@ export function createSyncer(options: SyncerOptions): Syncer {
     state.root = root;
     const { config, exists } = loadConfig(root);
     if (exists && !state.excludedConfig) await ensureConfigExcluded(root);
-    if (!config.enabled) return;
+    // Opt-in: the features are off while the config file does not exist.
+    if (!exists || !config.enabled) return;
     const branch = await currentBranch(root);
     if (!branch) return; // detached HEAD: leave the repo alone
     const statusRes = await git(
@@ -416,8 +417,9 @@ export function createSyncer(options: SyncerOptions): Syncer {
   > {
     const root = await repoRoot();
     if (!root) return { error: "not a git repository" };
-    const { config } = loadConfig(root);
-    const next = { ...config, enabled: !config.enabled };
+    const { config, exists } = loadConfig(root);
+    // First toggle on a repo without config opts in: creates the file, ON.
+    const next = { ...config, enabled: exists ? !config.enabled : true };
     saveConfig(root, next);
     await ensureConfigExcluded(root);
     // Re-enabling starts a fresh debounce clock.
@@ -438,7 +440,7 @@ export function createSyncer(options: SyncerOptions): Syncer {
     );
     return {
       root,
-      enabled: config.enabled,
+      enabled: exists && config.enabled, // effective state (opt-in)
       configPath: join(root, CONFIG_FILE),
       configExists: exists,
       pollingIntervalMinutes: config.pollingIntervalMinutes,

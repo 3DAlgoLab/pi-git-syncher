@@ -22,5 +22,5 @@ Minimize interfere with user or tool actions. Do it silently.
 
 Config file `.git-syncher.json` in the repo root (cwd). `/git-sync` generates it if missing.
 Config has following attributes
-- on or off activating the features. (default on)
+- on or off activating the features. (default on, but only while the config file exists — without it the features are off)
 - Polling interval. (default 1 minute)

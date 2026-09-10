@@ -23,7 +23,7 @@ In any repo, type:
 /git-sync status     # show repo, branch, remote, dirty state, last sync
 ```
 
-`/git-sync` creates `.git-syncher.json` in the repo root on first use and flips its `enabled` flag. The features are **on by default** — with no config file at all, a git repo with an `origin` remote is synced.
+The features are **opt-in per repo**: while `.git-syncher.json` does not exist, the repo is left alone. `/git-sync` creates the file on first use and turns the features **on**; further uses flip its `enabled` flag.
 
 ### Config — `.git-syncher.json` (repo root)
 
