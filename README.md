@@ -9,7 +9,7 @@ A [pi](https://pi.dev) coding-agent extension that keeps your git repo in sync w
 ## Install
 
 ```bash
-pi install git:github.com/3DAlgoLab/pi-git-syncher        
+pi install git:github.com/3DAlgoLab/pi-git-syncher
 ```
 
 or copy the repo into `~/.pi/agent/extensions/` (global) / `.pi/extensions/` (project). The extension loads in any pi session, regardless of directory.

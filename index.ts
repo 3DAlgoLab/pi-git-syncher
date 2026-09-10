@@ -128,8 +128,9 @@ function formatStatus(st: SyncerStatus): string {
     `repo:   ${st.root}`,
     `branch: ${st.branch ?? "detached HEAD"}${st.upstream ? ` -> ${st.upstream}` : " (no upstream)"}`,
     `remote: ${st.remote ?? "none"}`,
-    `dirty:  ${st.dirty ? `yes, quiet since ${new Date(st.dirtySince ?? 0).toISOString()}` : "no"}`,
-    `last:   ${st.lastSyncAt ? `${st.lastSyncKind} at ${new Date(st.lastSyncAt).toISOString()}` : "never"}`,
+    // Status shows local time (human-facing); commit messages keep UTC.
+    `dirty:  ${st.dirty ? `yes, quiet since ${new Date(st.dirtySince ?? 0).toLocaleString()}` : "no"}`,
+    `last:   ${st.lastSyncAt ? `${st.lastSyncKind} at ${new Date(st.lastSyncAt).toLocaleString()}` : "never"}`,
   ];
   if (!st.configExists)
     lines.push(`config: ${CONFIG_FILE} not found — run /git-sync to enable`);
