@@ -561,7 +561,10 @@ test("commitStaged: a failed push keeps the commit local and retries on the next
   const res = await f.syncer.commitStaged("feat: x");
   assert.equal(res.ok, false);
   assert.ok((res.error ?? "").includes("push failed"), res.error);
-  assert.equal(await sh(f.run, ["log", "-1", "--format=%s"], f.repo), "feat: x");
+  assert.equal(
+    await sh(f.run, ["log", "-1", "--format=%s"], f.repo),
+    "feat: x",
+  );
 
   await chmod(f.remote, 0o755);
   await f.syncer.tick(); // clean tree: pushes the pending commit

@@ -65,11 +65,11 @@ export default function (pi: ExtensionAPI) {
           content: [
             {
               type: "text" as const,
-              text: !res
-                ? "git-syncher: no active syncer in this session"
-                : res.ok
+              text: res
+                ? res.ok
                   ? `git-syncher: committed & pushed: ${subject}`
-                  : `git-syncher: ${res.error}`,
+                  : `git-syncher: ${res.error}`
+                : "git-syncher: no active syncer in this session",
             },
           ],
           details,

@@ -355,7 +355,10 @@ export function createSyncer(options: SyncerOptions): Syncer {
   async function commitStaged(message: string): Promise<CommitStagedResult> {
     const root = await repoRoot();
     if (!root) return { ok: false, error: "not a git repository" };
-    const mergeHead = await git(["rev-parse", "-q", "--verify", "MERGE_HEAD"], root);
+    const mergeHead = await git(
+      ["rev-parse", "-q", "--verify", "MERGE_HEAD"],
+      root,
+    );
     if (mergeHead.code === 0) {
       return {
         ok: false,
