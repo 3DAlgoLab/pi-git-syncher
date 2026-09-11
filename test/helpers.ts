@@ -89,7 +89,7 @@ export interface Fixture {
 
 export async function makeFixture(
   t: { after(fn: () => Promise<void> | void): void },
-  opts: { remote?: boolean; config?: boolean } = {},
+  opts: { remote?: boolean; config?: boolean; induce?: boolean } = {},
 ): Promise<Fixture> {
   const run = makeRun();
   const dir = await mkdtemp(join(tmpdir(), "pi-git-syncher-"));
@@ -129,7 +129,7 @@ export async function makeFixture(
     clock,
     idle: () => idle,
     notes,
-    induce: (s) => induced.push(s),
+    induce: opts.induce === false ? undefined : (s) => induced.push(s),
   });
 
   return {

@@ -2,7 +2,7 @@
 
 A [pi](https://pi.dev) coding-agent extension that keeps your git repo in sync while you (or the agent) work:
 
-- **Automatic commit & push** — polls the repo on an interval. When the working tree is dirty, a 30-minute debounce clock starts; any new change restarts it. Once the tree has been quiet for 30 minutes, it runs `git add -A`, commits, and pushes.
+- **Automatic commit & push** — polls the repo on an interval. When the working tree is dirty, a 30-minute debounce clock starts; any new change restarts it. Once the tree has been quiet for 30 minutes and pi is idle, it stages everything and asks the idle agent to write a proper commit message; the agent commits via the `git_syncher_commit` tool, which also pushes.
 - **Automatic retrieving** — on each poll, if the working tree is clean and the remote has new commits, it runs `git pull --ff-only`. If the branch has diverged (push rejected elsewhere), it asks the running agent to resolve it (`git merge origin/<branch>` + push) — the syncher itself never auto-merges.
 - **Silent by design** — no notifications except for actual sync events (committed & pushed / pulled) and one-shot warnings for problems you should know about (push failed, branch diverged, no remote).
 
@@ -47,9 +47,9 @@ The 30-minute debounce is fixed by design.
 - **Change detection** is `git status --porcelain` plus the mtime of each dirty path, so repeated edits to the same file correctly restart the 30-minute wait.
 - **Never acts mid-turn.** Commit/push/pull only run while pi is idle; the dirty clock keeps tracking changes during an active turn, so a long agent run simply keeps the debounce alive.
 - **Safe git.** Pulls are `--ff-only`. A diverged branch is never auto-merged: the syncher injects a session message asking the agent to resolve it (`git merge origin/<branch>`, conflicts included, then push) — once per divergence episode. While a merge is in progress, the syncher never auto-commits the conflicted state (a `MERGE_HEAD` guard). Detached HEAD and repos without an `origin` remote are left alone. If a push fails (e.g. network), the commit stays local and is pushed on a later poll.
-- **Commit message:** `chore(git-syncher): auto-commit N file(s), <ISO timestamp>`.
+- **Commit message:** written by the AI. When the debounce clock expires, the syncher stages the changes and sends a session message asking the idle agent to review `git diff --cached` and the repo's `git log` style, then call the `git_syncher_commit` tool with its message. The syncher performs the actual `git commit` + `git push` — the agent only supplies the message. At most one such request per 30-minute quiet window (a failed agent turn retries quietly). Hosts without an agent hook fall back to the fixed message `chore(git-syncher): auto-commit N file(s), <ISO timestamp>`.
 - **The config file does not dirty your repo.** When the syncer creates `.git-syncher.json` it adds it to the repo-local `.git/info/exclude`, so the config itself never triggers a commit. If you deliberately commit the config (e.g. to share settings), it is tracked normally and changes to it sync like any other file.
-- **Notifications:** `committed & pushed N file(s)`, `pulled N new commit(s)`, `pushed N pending commit(s)`, plus one-time warnings (`no remote`, `no upstream`, `push failed`, `pull failed`, `diverged`).
+- **Notifications:** `committed & pushed: <subject>`, `pulled N new commit(s)`, `pushed N pending commit(s)`, plus one-time warnings (`no remote`, `no upstream`, `push failed`, `pull failed`, `diverged`).
 
 ## Development
 

@@ -9,11 +9,12 @@
  * interval always follows the current config file.
  */
 
-import type {
-  ExtensionAPI,
-  ExtensionContext,
+import {
+  defineTool,
+  type ExtensionAPI,
+  type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
-import { join } from "node:path";
+import { Type } from "typebox";
 import {
   CONFIG_FILE,
   createSyncer,
@@ -26,11 +27,56 @@ const FALLBACK_INTERVAL_MS = 60_000;
 const MIN_INTERVAL_MS = 5_000;
 const GIT_TIMEOUT_MS = 120_000;
 
+interface CommitToolDetails {
+  ok: boolean;
+  error: string | null;
+  subject: string | null;
+}
+
 export default function (pi: ExtensionAPI) {
   let syncer: Syncer | null = null;
   let ctx: ExtensionContext | null = null;
   let timer: NodeJS.Timeout | null = null;
   let inFlight = false;
+
+  // The agent's auto-commit write-up comes back through this tool: the
+  // syncer staged the changes, the agent picked the message, and this
+  // extension performs the commit and push.
+  pi.registerTool(
+    defineTool({
+      name: "git_syncher_commit",
+      label: "Git Syncher: commit & push",
+      description:
+        "Commit the already-staged changes of the current repo with the given message and push to origin. Only use it when a [pi-git-syncher] auto-commit message asks you to.",
+      parameters: Type.Object({
+        message: Type.String({
+          description:
+            "Full commit message: imperative subject line (max 72 chars), optional body after a blank line",
+        }),
+      }),
+      async execute(_toolCallId, params) {
+        const s = syncer;
+        const res = s ? await s.commitStaged(params.message) : null;
+        const subject = params.message.split("\n")[0].trim();
+        const details: CommitToolDetails = res
+          ? { ok: res.ok, error: res.error ?? null, subject }
+          : { ok: false, error: "no active syncer", subject: null };
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: !res
+                ? "git-syncher: no active syncer in this session"
+                : res.ok
+                  ? `git-syncher: committed & pushed: ${subject}`
+                  : `git-syncher: ${res.error}`,
+            },
+          ],
+          details,
+        };
+      },
+    }),
+  );
 
   function bind(sessionCtx: ExtensionContext): Syncer {
     ctx = sessionCtx;

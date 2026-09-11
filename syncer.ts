@@ -5,8 +5,12 @@
  *
  * - Automatic commit & push: while the working tree is dirty, a 30-minute
  *   debounce clock runs. Any new change (fingerprint change of the dirty
- *   state) restarts the clock. When the clock expires and pi is idle,
- *   the engine runs `git add -A`, commits, and pushes.
+ *   state) restarts the clock. When the clock expires and pi is idle, the
+ *   engine stages everything and, if an agent hook is available, hands the
+ *   idle agent the job of writing a proper commit message: the agent calls
+ *   the host's git_syncher_commit tool, and the engine commits & pushes.
+ *   Without an agent hook it falls back to a fixed `chore(git-syncher)`
+ *   message.
  * - Automatic retrieving: while the working tree is clean, the engine
  *   fetches and, if the remote is ahead, runs `git pull --ff-only`.
  *   Pending local commits are pushed first (e.g. after a failed push).
@@ -36,6 +40,12 @@ export interface GitResult {
   code: number;
   stdout: string;
   stderr: string;
+}
+
+export interface CommitStagedResult {
+  ok: boolean;
+  /** Human-readable reason when `ok` is false. */
+  error?: string;
 }
 
 /** Runs `git <args>` in `cwd`. */
@@ -81,6 +91,12 @@ export interface SyncerState {
    * (or a fresh divergence after resolution) induces again.
    */
   inducedDivergence: string | null;
+  /**
+   * Clock time of the last auto-commit induction for the current dirty
+   * streak, or null. Re-induction is allowed at most once per debounce
+   * window, so a failed agent turn retries quietly instead of spamming.
+   */
+  commitInducedAt: number | null;
   lastSyncAt: number | null;
   lastSyncKind: "commit" | "pull" | null;
 }
@@ -108,6 +124,12 @@ export interface Syncer {
   /** Flips `enabled` in the config file (created if missing). */
   toggle(): Promise<{ root: string; enabled: boolean } | { error: string }>;
   status(): Promise<SyncerStatus | { error: string }>;
+  /**
+   * Commits the already-staged changes with the agent-generated message
+   * and pushes. Invoked by the host's git_syncher_commit tool; the
+   * syncher keeps control of the actual git operations.
+   */
+  commitStaged(message: string): Promise<CommitStagedResult>;
 }
 
 /** Parses a raw config value; invalid fields fall back to defaults. */
@@ -174,6 +196,22 @@ export function divergenceInstruction(
   ].join("\n");
 }
 
+/**
+ * Instruction handed to the idle agent when the debounce clock expires: the
+ * engine has staged everything; the agent only writes a proper message and
+ * calls the host's git_syncher_commit tool.
+ */
+export function commitMessageInstruction(branch: string): string {
+  return [
+    `[pi-git-syncher] Auto-commit window on branch '${branch}': the repo has uncommitted changes that have been quiet for 30 minutes.`,
+    "The changes are already staged (git add -A). Produce the commit:",
+    "1. Review the staged changes: `git diff --cached` (start with `git diff --cached --stat` if the diff is large)",
+    "2. Match the repo's commit style: `git log --oneline -10`",
+    '3. Call the `git_syncher_commit` tool with { "message": "..." } — it commits the staged changes and pushes. Do not run git commit/push yourself and do not edit any files.',
+    "Message rules: one concise commit — imperative subject line (max 72 chars) describing what actually changed; a short body only if it adds real context. If the staged diff turns out empty, stop and say so.",
+  ].join("\n");
+}
+
 export function createSyncer(options: SyncerOptions): Syncer {
   const run = options.run;
   const now = options.now ?? Date.now;
@@ -189,6 +227,7 @@ export function createSyncer(options: SyncerOptions): Syncer {
     excludedConfig: false,
     warned: new Set(),
     inducedDivergence: null,
+    commitInducedAt: null,
     lastSyncAt: null,
     lastSyncKind: null,
   };
@@ -305,6 +344,71 @@ export function createSyncer(options: SyncerOptions): Syncer {
     markSync("commit");
     notify("info", `git-syncher: committed & pushed ${fileCount} file(s)`);
     return true;
+  }
+
+  /**
+   * Commits the already-staged changes with the agent-generated message and
+   * pushes. Invoked by the host's git_syncher_commit tool. Never stages
+   * anything: the tick that induced the agent staged exactly what it
+   * reviewed, and anything new is left for the next cycle.
+   */
+  async function commitStaged(message: string): Promise<CommitStagedResult> {
+    const root = await repoRoot();
+    if (!root) return { ok: false, error: "not a git repository" };
+    const mergeHead = await git(["rev-parse", "-q", "--verify", "MERGE_HEAD"], root);
+    if (mergeHead.code === 0) {
+      return {
+        ok: false,
+        error: "a merge is in progress; resolve it before committing",
+      };
+    }
+    const branch = await currentBranch(root);
+    if (!branch) {
+      return { ok: false, error: "detached HEAD; refusing to commit" };
+    }
+    const remote = await remoteUrl(root);
+    if (!remote) {
+      return { ok: false, error: "no remote 'origin'; refusing to commit" };
+    }
+    const staged = await git(["diff", "--cached", "--quiet"], root);
+    if (staged.code === 0) {
+      return { ok: false, error: "nothing is staged; nothing to commit" };
+    }
+    const text = message.trim();
+    if (!text) return { ok: false, error: "the commit message is empty" };
+    const commit = await git(["commit", "-m", text], root);
+    if (commit.code !== 0) {
+      return {
+        ok: false,
+        error: `git commit failed: ${firstLine(commit.stderr || commit.stdout)}`,
+      };
+    }
+    // The staged set is committed; the dirty streak is over. If new
+    // unstaged changes appeared meanwhile, the next tick starts a fresh
+    // debounce clock for them.
+    state.dirtySince = null;
+    state.snapshot = null;
+    state.commitInducedAt = null;
+    const upstream = await hasUpstream(root);
+    const push = await git(
+      upstream ? ["push"] : ["push", "-u", "origin", branch],
+      root,
+    );
+    if (push.code !== 0) {
+      // The commit stays local; the clean-tree path retries the push.
+      const detail = firstLine(push.stderr || push.stdout);
+      notify(
+        "warning",
+        `push failed: ${detail} (commit kept local, will retry)`,
+      );
+      return {
+        ok: false,
+        error: `committed locally, but the push failed: ${detail} — it will be pushed on the next sync`,
+      };
+    }
+    markSync("commit");
+    notify("info", `git-syncher: committed & pushed: ${text.split("\n")[0]}`);
+    return { ok: true };
   }
 
   /** For a clean tree: push pending local commits, then ff-only pull if behind. */
@@ -449,6 +553,35 @@ export function createSyncer(options: SyncerOptions): Syncer {
           root,
         );
         if (mergeHead.code === 0) return;
+        if (induce) {
+          // The agent is idle, so it writes the commit message. Stage
+          // everything, then ask the agent to review the staged diff and
+          // call the git_syncher_commit tool. At most one induction per
+          // debounce window, so a failed agent turn retries quietly.
+          if (
+            state.commitInducedAt !== null &&
+            t - state.commitInducedAt < debounceMs
+          ) {
+            return;
+          }
+          const remote = await remoteUrl(root);
+          if (!remote) {
+            warnOnce("no-remote", "no remote 'origin'; auto-commit skipped");
+            return;
+          }
+          const add = await git(["add", "-A"], root);
+          if (add.code !== 0) {
+            warnOnce(
+              "add-failed",
+              `git add failed: ${firstLine(add.stderr || add.stdout)}`,
+            );
+            return;
+          }
+          state.commitInducedAt = t;
+          await induce(commitMessageInstruction(branch));
+          return;
+        }
+        // No agent hook: fall back to the fixed message.
         const files = statusRes.stdout
           .split("\n")
           .filter((l) => l.trim()).length;
@@ -462,6 +595,7 @@ export function createSyncer(options: SyncerOptions): Syncer {
 
     state.dirtySince = null;
     state.snapshot = null;
+    state.commitInducedAt = null;
     await syncCleanTree(root, branch);
   }
 
@@ -478,6 +612,7 @@ export function createSyncer(options: SyncerOptions): Syncer {
     // Re-enabling starts a fresh debounce clock.
     state.dirtySince = null;
     state.snapshot = null;
+    state.commitInducedAt = null;
     state.warned.clear();
     return { root, enabled: next.enabled };
   }
@@ -508,7 +643,7 @@ export function createSyncer(options: SyncerOptions): Syncer {
     };
   }
 
-  return { state, tick, toggle, status };
+  return { state, tick, toggle, status, commitStaged };
 }
 
 function firstLine(text: string): string {

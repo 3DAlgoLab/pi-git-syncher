@@ -115,7 +115,7 @@ test("pull: skips while the working tree is dirty", async (t) => {
 });
 
 test("commit & push: commits after a quiet debounce", async (t) => {
-  const f = await makeFixture(t);
+  const f = await makeFixture(t, { induce: false }); // host without an agent hook
   const remoteBefore = await ref(f.run, f.remote, "main");
   await writeFile(join(f.repo, "new.txt"), "content\n");
 
@@ -146,7 +146,7 @@ test("commit & push: commits after a quiet debounce", async (t) => {
 });
 
 test("commit & push: repeated edits to the same file restart the clock", async (t) => {
-  const f = await makeFixture(t);
+  const f = await makeFixture(t, { induce: false }); // host without an agent hook
   const remoteBefore = await ref(f.run, f.remote, "main");
   await writeFile(join(f.repo, "a.txt"), "v1\n");
   await f.syncer.tick(); // t0: clock starts
@@ -168,7 +168,7 @@ test("commit & push: repeated edits to the same file restart the clock", async (
 });
 
 test("commit & push: waits while the agent is busy", async (t) => {
-  const f = await makeFixture(t);
+  const f = await makeFixture(t, { induce: false }); // host without an agent hook
   const remoteBefore = await ref(f.run, f.remote, "main");
   await writeFile(join(f.repo, "busy.txt"), "x\n");
   await f.syncer.tick();
@@ -209,7 +209,7 @@ test("commit & push: skipped without a remote", async (t) => {
 });
 
 test("push: retries a failed push once the remote is reachable again", async (t) => {
-  const f = await makeFixture(t);
+  const f = await makeFixture(t, { induce: false }); // host without an agent hook
   await writeFile(join(f.repo, "x.txt"), "x\n");
   await f.syncer.tick();
   advance(f, 31);
@@ -361,9 +361,7 @@ test("diverged: induces the agent once per episode", async (t) => {
   await f.syncer.tick();
   assert.equal(f.induced.length, 1);
   assert.ok(f.induced[0].includes("git merge origin/main"));
-  assert.ok(
-    f.induced[0].includes("1 commit(s) ahead and 1 commit(s) behind"),
-  );
+  assert.ok(f.induced[0].includes("1 commit(s) ahead and 1 commit(s) behind"));
 
   // Same episode on the next tick: no second induction.
   await f.syncer.tick();
@@ -418,11 +416,7 @@ test("merge in progress: a conflicted merge is never auto-committed", async (t) 
   const merge = await f.run(["merge", "origin/main"], f.repo);
   assert.notEqual(merge.code, 0, "expected a conflict");
   assert.equal(
-    await sh(
-      f.run,
-      ["rev-parse", "-q", "--verify", "MERGE_HEAD"],
-      f.repo,
-    ),
+    await sh(f.run, ["rev-parse", "-q", "--verify", "MERGE_HEAD"], f.repo),
     await ref(f.run, f.remote, "main"),
     "merge in progress",
   );
@@ -431,8 +425,149 @@ test("merge in progress: a conflicted merge is never auto-committed", async (t) 
   advance(f, 31);
   await f.syncer.tick();
   assert.equal(
+    f.induced.length,
+    0,
+    "no agent induction while a merge is in progress",
+  );
+  assert.equal(
     await sh(f.run, ["log", "-1", "--format=%s"], f.repo),
     "local",
     "no auto-commit while a merge is in progress",
   );
+});
+test("commit: with an agent hook, the idle agent writes the message", async (t) => {
+  const f = await makeFixture(t);
+  const remoteBefore = await ref(f.run, f.remote, "main");
+  await writeFile(join(f.repo, "new.txt"), "content\n");
+
+  await f.syncer.tick(); // starts the clock
+  advance(f, 31);
+  await f.syncer.tick();
+
+  // Nothing committed yet: the agent was asked instead.
+  assert.equal(await ref(f.run, f.remote, "main"), remoteBefore);
+  assert.equal(f.induced.length, 1);
+  assert.ok(f.induced[0].includes("git_syncher_commit"), f.induced[0]);
+  // The changes were staged for the agent to inspect.
+  const staged = await f.run(["diff", "--cached", "--stat"], f.repo);
+  assert.ok(staged.stdout.includes("new.txt"), staged.stdout);
+
+  // The agent calls back with its message.
+  const res = await f.syncer.commitStaged("feat: add new.txt");
+  assert.equal(res.ok, true);
+  assert.equal(
+    await ref(f.run, f.remote, "main"),
+    await ref(f.run, f.repo, "HEAD"),
+  );
+  assert.equal(
+    await sh(f.run, ["log", "-1", "--format=%s"], f.repo),
+    "feat: add new.txt",
+  );
+  assert.equal(await sh(f.run, ["show", "main:new.txt"], f.remote), "content");
+  assert.equal(f.syncer.state.dirtySince, null);
+  assert.ok(
+    f.notes.some(
+      (n) =>
+        n.type === "info" &&
+        n.message.includes("committed & pushed: feat: add new.txt"),
+    ),
+  );
+});
+
+test("commit: at most one agent induction per quiet window", async (t) => {
+  const f = await makeFixture(t);
+  await writeFile(join(f.repo, "a.txt"), "x\n");
+  await f.syncer.tick();
+  advance(f, 31);
+  await f.syncer.tick();
+  assert.equal(f.induced.length, 1);
+
+  // Next poll, same dirty state: no second induction.
+  advance(f, 1);
+  await f.syncer.tick();
+  assert.equal(f.induced.length, 1);
+
+  // A full debounce window later the (failed) attempt is retried once.
+  advance(f, 30);
+  await f.syncer.tick();
+  assert.equal(f.induced.length, 2);
+});
+
+test("commit: a new change after an induction restarts the cycle", async (t) => {
+  const f = await makeFixture(t);
+  await writeFile(join(f.repo, "a.txt"), "v1\n");
+  await f.syncer.tick();
+  advance(f, 31);
+  await f.syncer.tick();
+  assert.equal(f.induced.length, 1);
+
+  // The user edits again: the debounce clock restarts.
+  await new Promise((r) => setTimeout(r, 20)); // mtime granularity
+  await writeFile(join(f.repo, "a.txt"), "v2\n");
+  await f.syncer.tick();
+  advance(f, 31);
+  await f.syncer.tick();
+  assert.equal(f.induced.length, 2);
+});
+
+test("commitStaged: refuses while a merge is in progress", async (t) => {
+  const f = await makeFixture(t);
+  await writeFile(join(f.repo, "README.md"), "local edit\n");
+  await sh(f.run, ["add", "-A"], f.repo);
+  await sh(f.run, ["commit", "-m", "local"], f.repo);
+  const other = await f.otherClone();
+  await writeFile(join(other, "README.md"), "remote edit\n");
+  await sh(f.run, ["add", "-A"], other);
+  await sh(
+    f.run,
+    [
+      "-c",
+      "user.email=other@test.local",
+      "-c",
+      "user.name=Other",
+      "commit",
+      "-m",
+      "remote",
+    ],
+    other,
+  );
+  await sh(f.run, ["push"], other);
+  await sh(f.run, ["fetch", "origin"], f.repo);
+  const merge = await f.run(["merge", "origin/main"], f.repo);
+  assert.notEqual(merge.code, 0, "expected a conflict");
+
+  const res = await f.syncer.commitStaged("feat: x");
+  assert.equal(res.ok, false);
+  assert.ok((res.error ?? "").includes("merge"), res.error);
+  assert.equal(await sh(f.run, ["log", "-1", "--format=%s"], f.repo), "local");
+});
+
+test("commitStaged: refuses when nothing is staged", async (t) => {
+  const f = await makeFixture(t);
+  const res = await f.syncer.commitStaged("feat: nothing");
+  assert.equal(res.ok, false);
+  assert.ok((res.error ?? "").includes("nothing is staged"), res.error);
+});
+
+test("commitStaged: a failed push keeps the commit local and retries on the next sync", async (t) => {
+  const f = await makeFixture(t);
+  await writeFile(join(f.repo, "x.txt"), "x\n");
+  await f.syncer.tick();
+  advance(f, 31);
+  await f.syncer.tick(); // stages + induces
+  assert.equal(f.induced.length, 1);
+
+  await chmod(f.remote, 0o555); // push fails (local transport can't write refs)
+  const res = await f.syncer.commitStaged("feat: x");
+  assert.equal(res.ok, false);
+  assert.ok((res.error ?? "").includes("push failed"), res.error);
+  assert.equal(await sh(f.run, ["log", "-1", "--format=%s"], f.repo), "feat: x");
+
+  await chmod(f.remote, 0o755);
+  await f.syncer.tick(); // clean tree: pushes the pending commit
+  assert.equal(
+    await ref(f.run, f.remote, "main"),
+    await ref(f.run, f.repo, "HEAD"),
+  );
+  assert.ok(f.notes.some((n) => n.message.includes("pushed 1 pending commit")));
 });

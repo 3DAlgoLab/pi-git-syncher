@@ -23,9 +23,9 @@ interface FakePi {
       handler: (args: string, ctx: FakeCtx) => Promise<void>;
     }
   >;
+  tools: Record<string, unknown>;
   sentMessages: Array<{ content: string; options?: unknown }>;
 }
-
 
 interface FakeCtx {
   cwd: string;
@@ -44,6 +44,7 @@ function makeFakePi(
 ): FakePi {
   const handlers: FakePi["handlers"] = {};
   const commands: FakePi["commands"] = {};
+  const tools: FakePi["tools"] = {};
   const sentMessages: FakePi["sentMessages"] = [];
   const pi = {
     on: (event: string, handler: (event: unknown, ctx: FakeCtx) => void) => {
@@ -51,6 +52,9 @@ function makeFakePi(
     },
     registerCommand: (name: string, opts: FakePi["commands"][string]) => {
       commands[name] = opts;
+    },
+    registerTool: (tool: { name: string }) => {
+      tools[tool.name] = tool;
     },
     exec: async (_cmd: string, args: string[], options?: { cwd?: string }) => {
       const res = await run(args, options?.cwd ?? process.cwd());
@@ -60,7 +64,7 @@ function makeFakePi(
       sentMessages.push({ content: msg.content, options });
     },
   } as unknown as ExtensionAPI;
-  return { pi, handlers, commands, sentMessages };
+  return { pi, handlers, commands, sentMessages, tools };
 }
 
 function makeCtx(cwd: string): FakeCtx {
@@ -98,7 +102,7 @@ function waitFor(
 
 test("extension: polls, pulls, toggles, and reports status", async (t) => {
   const f = await makeFixture(t);
-  const { pi, handlers, commands } = makeFakePi(f.run);
+  const { pi, handlers, commands, tools } = makeFakePi(f.run);
   const ctx = makeCtx(f.repo);
 
   // Fast polling (clamped to 5s by the extension).
@@ -111,6 +115,7 @@ test("extension: polls, pulls, toggles, and reports status", async (t) => {
   extension(pi);
   assert.ok(commands["git-sync"], "/git-sync command registered");
 
+  assert.ok(tools["git_syncher_commit"], "git_syncher_commit tool registered");
   // A remote commit lands before the first tick -> should be pulled.
   await pushRemoteCommit(f, "pulled.txt", "remote content\n");
   for (const h of handlers["session_start"] ?? []) h({}, ctx);
