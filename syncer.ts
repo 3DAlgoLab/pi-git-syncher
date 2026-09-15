@@ -620,6 +620,10 @@ export function createSyncer(options: SyncerOptions): Syncer {
     state.dirtySince = null;
     state.snapshot = null;
     state.commitInducedAt = null;
+    // Never touch the tree mid-turn: a pull rewrites files under a
+    // working agent. The dirty path above is idle-gated too; the README
+    // promises both.
+    if (!isIdle()) return;
     await syncCleanTree(root, branch);
   }
 

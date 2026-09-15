@@ -603,3 +603,23 @@ test("subfolder session: fully dormant even past the debounce window", async (t)
   await f.syncer.tick();
   assert.equal(f.induced.length, 1);
 });
+
+test("clean tree: push/pull waits for idle", async (t) => {
+  const f = await makeFixture(t);
+  await pushRemoteCommit(f, "up.txt", "u\n");
+
+  // Mid-turn: the remote is ahead but the tree must not move.
+  f.setIdle(false);
+  await f.syncer.tick();
+  assert.equal(await sh(f.run, ["rev-list", "--count", "HEAD"], f.repo), "1");
+  assert.deepEqual(
+    f.notes.filter((n) => n.message.includes("pulled")),
+    [],
+  );
+
+  // Idle: the same condition now pulls.
+  f.setIdle(true);
+  await f.syncer.tick();
+  assert.equal(await sh(f.run, ["rev-list", "--count", "HEAD"], f.repo), "2");
+  assert.ok(f.notes.some((n) => n.message.includes("pulled 1 new commit")));
+});
