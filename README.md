@@ -43,7 +43,7 @@ The 30-minute debounce is fixed by design.
 
 ## Behavior details
 
-- **Per repo, keyed by the repo root.** The synced repo is the toplevel of pi's working directory; state (dirty clock) is in-memory per session. If pi restarts mid-wait, the clock restarts from the next poll.
+- **Per repo, launched at the root.** All features activate only when pi's working directory IS the repo root: a session started in a subfolder stays fully dormant and never touches git (`/git-sync status` shows why). State (dirty clock) is in-memory per session; restarting pi mid-wait restarts the clock.
 - **Change detection** is `git status --porcelain` plus the mtime of each dirty path, so repeated edits to the same file correctly restart the 30-minute wait.
 - **Never acts mid-turn.** Commit/push/pull only run while pi is idle; the dirty clock keeps tracking changes during an active turn, so a long agent run simply keeps the debounce alive.
 - **Safe git.** Pulls are `--ff-only`. A diverged branch is never auto-merged: the syncher injects a session message asking the agent to resolve it (`git merge origin/<branch>`, conflicts included, then push) — once per divergence episode. While a merge is in progress, the syncher never auto-commits the conflicted state (a `MERGE_HEAD` guard). Detached HEAD and repos without an `origin` remote are left alone. If a push fails (e.g. network), the commit stays local and is pushed on a later poll.

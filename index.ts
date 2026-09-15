@@ -194,6 +194,7 @@ function formatStatus(st: SyncerStatus): string {
   const lines = [
     `git-syncher: ${st.enabled ? "ON" : "OFF"} (poll every ${st.pollingIntervalMinutes} min)`,
     `repo:   ${st.root}`,
+    `cwd:    ${st.atRoot ? "repo root" : "SUBFOLDER - dormant (launch pi at the repo root to sync)"}`,
     `branch: ${st.branch ?? "detached HEAD"}${st.upstream ? ` -> ${st.upstream}` : " (no upstream)"}`,
     `remote: ${st.remote ?? "none"}`,
     // Status shows local time (human-facing); commit messages keep UTC.

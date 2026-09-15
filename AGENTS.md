@@ -17,6 +17,8 @@ Automatic retrieving
 - If local repo is changed, don't need to do it. Automatic commit & push feature would handle it.
 - If local and remote diverged (push rejected), never auto-merge — ask the agent (the running pi session) to resolve it: `git merge origin/<branch>` (resolving conflicts if any), then push. One request per divergence episode. While a merge is in progress, never auto-commit the conflicted state.
 
+- The extension only does git work when the session's cwd is the git repo root. A pi launched in a subfolder of the repo stays fully dormant.
+
 Minimize interfere with user or tool actions. Do it silently.
 
 ## Slash(/) commands

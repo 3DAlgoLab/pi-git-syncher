@@ -574,3 +574,32 @@ test("commitStaged: a failed push keeps the commit local and retries on the next
   );
   assert.ok(f.notes.some((n) => n.message.includes("pushed 1 pending commit")));
 });
+
+test("subfolder session: fully dormant even past the debounce window", async (t) => {
+  const f = await makeFixture(t);
+  const sub = join(f.repo, "apps", "worker");
+  await mkdir(sub, { recursive: true });
+  await writeFile(join(sub, "job.ts"), "work in progress\n");
+  const subSyncer = f.syncerAt(sub);
+
+  const st = await subSyncer.status();
+  assert.equal("error" in st ? "error" : st.atRoot, false);
+
+  // Remote moves ahead and the subfolder session gets dirty; either one
+  // would trigger a sync if the session were rooted at the repo.
+  await pushRemoteCommit(f, "upstream.txt", "remote\n");
+  advance(f, 31);
+  await subSyncer.tick();
+
+  assert.deepEqual(f.induced, []);
+  assert.deepEqual(f.notes, []);
+  // Nothing pulled, nothing committed: HEAD is still the init commit.
+  assert.equal(await sh(f.run, ["rev-list", "--count", "HEAD"], sub), "1");
+
+  // The same fixture seen from the repo root still syncs normally:
+  // first tick starts its dirty clock, expiry brings the induction.
+  await f.syncer.tick();
+  advance(f, 31);
+  await f.syncer.tick();
+  assert.equal(f.induced.length, 1);
+});

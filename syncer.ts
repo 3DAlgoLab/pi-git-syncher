@@ -1,7 +1,9 @@
 /**
  * Pi Git Syncher — core engine.
  *
- * Tracks one git repository (the toplevel of `getCwd()`) and performs:
+ * Tracks the git repository at `getCwd()` - and acts only when `getCwd()`
+ * IS that repo's root: a session launched in a subfolder stays fully
+ * dormant. Its features:
  *
  * - Automatic commit & push: while the working tree is dirty, a 30-minute
  *   debounce clock runs. Any new change (fingerprint change of the dirty
@@ -23,11 +25,12 @@ import {
   appendFileSync,
   existsSync,
   mkdirSync,
+  realpathSync,
   readFileSync,
   statSync,
   writeFileSync,
 } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 export const CONFIG_FILE = ".git-syncher.json";
 export const DEFAULT_POLLING_MINUTES = 1;
@@ -106,6 +109,8 @@ export interface SyncerStatus {
   enabled: boolean;
   configPath: string;
   configExists: boolean;
+  /** False when pi's cwd is a subfolder of the repo: the session is dormant. */
+  atRoot: boolean;
   pollingIntervalMinutes: number;
   branch: string | null;
   upstream: string | null;
@@ -521,9 +526,25 @@ export function createSyncer(options: SyncerOptions): Syncer {
     return target;
   }
 
+  /** Real path of pi's cwd; falls back to the raw path if it vanished. */
+  function realCwd(): string {
+    try {
+      return realpathSync(options.getCwd());
+    } catch {
+      return resolve(options.getCwd());
+    }
+  }
+
   async function tick(): Promise<void> {
     const root = await repoRoot();
     if (!root) {
+      state.root = null;
+      return;
+    }
+    // Root guard: only a session launched at the repo root performs git
+    // tasks. A pi started in a subfolder of an enabled repo does nothing
+    // (its own work must not be committed/pulled by surprise).
+    if (realCwd() !== root) {
       state.root = null;
       return;
     }
@@ -634,6 +655,7 @@ export function createSyncer(options: SyncerOptions): Syncer {
       enabled: exists && config.enabled, // effective state (opt-in)
       configPath: join(root, CONFIG_FILE),
       configExists: exists,
+      atRoot: realCwd() === root,
       pollingIntervalMinutes: config.pollingIntervalMinutes,
       branch,
       upstream: upstreamRes.code === 0 ? upstreamRes.stdout.trim() : null,

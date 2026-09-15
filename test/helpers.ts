@@ -83,6 +83,8 @@ export interface Fixture {
   induced: string[];
   syncer: Syncer;
   setIdle(v: boolean): void;
+  /** A second syncer whose session cwd is elsewhere (e.g. a subfolder). */
+  syncerAt(cwd: string): Syncer;
   /** Creates a second clone of the remote in the fixture dir. */
   otherClone(): Promise<string>;
 }
@@ -144,6 +146,15 @@ export async function makeFixture(
     setIdle: (v) => {
       idle = v;
     },
+    syncerAt: (cwd: string) =>
+      createSyncerForFixture({
+        run,
+        cwd,
+        clock,
+        idle: () => idle,
+        notes,
+        induce: opts.induce === false ? undefined : (s) => induced.push(s),
+      }),
     otherClone: async () => {
       const other = join(dir, `other-${++cloneCount}`);
       await sh(run, ["clone", remote, other], dir);
