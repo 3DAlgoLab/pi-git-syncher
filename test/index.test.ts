@@ -134,7 +134,9 @@ test("extension: polls, pulls, toggles, and reports status", async (t) => {
   const statusNote = ctx.notes.find((n) => n.message.includes("repo:"));
   assert.ok(statusNote, "status notification present");
   assert.ok(
-    statusNote.message.includes(`repo:   ${f.repo}`),
+    statusNote.message.replace(/\\/g, "/").includes(
+      `repo:   ${f.repo.replace(/\\/g, "/")}`,
+    ),
     statusNote.message,
   );
   assert.ok(

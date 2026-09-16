@@ -5,7 +5,7 @@
 
 import { execFile } from "node:child_process";
 import { access, mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
-import { devNull, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   createSyncer,
@@ -19,7 +19,7 @@ export const MIN = 60_000;
 export const DEBOUNCE = 30 * MIN;
 
 /** Git runner for tests; isolates global/system git config. */
-export function makeRun(): GitRunner {
+export function makeRun(configPath: string): GitRunner {
   return (args, cwd) =>
     new Promise<GitResult>((resolve) => {
       execFile(
@@ -30,8 +30,8 @@ export function makeRun(): GitRunner {
           timeout: 30_000,
           env: {
             ...process.env,
-            GIT_CONFIG_GLOBAL: devNull,
-            GIT_CONFIG_SYSTEM: devNull,
+            GIT_CONFIG_GLOBAL: configPath,
+            GIT_CONFIG_SYSTEM: configPath,
             GIT_TERMINAL_PROMPT: "0",
           },
         },
@@ -93,9 +93,13 @@ export async function makeFixture(
   t: { after(fn: () => Promise<void> | void): void },
   opts: { remote?: boolean; config?: boolean; induce?: boolean } = {},
 ): Promise<Fixture> {
-  const run = makeRun();
   const dir = await mkdtemp(join(tmpdir(), "pi-git-syncher-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
+  // A real empty file, not the NUL device: git-for-windows mangles
+  // device-name config paths (fatal: unable to access '//./nul').
+  const emptyConfig = join(dir, "empty-git-config");
+  await writeFile(emptyConfig, "");
+  const run = makeRun(emptyConfig);
 
   const repo = join(dir, "work");
   const remote = join(dir, "origin.git");

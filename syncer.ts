@@ -544,7 +544,7 @@ export function createSyncer(options: SyncerOptions): Syncer {
     // Root guard: only a session launched at the repo root performs git
     // tasks. A pi started in a subfolder of an enabled repo does nothing
     // (its own work must not be committed/pulled by surprise).
-    if (realCwd() !== root) {
+    if (!samePath(realCwd(), root)) {
       state.root = null;
       return;
     }
@@ -654,17 +654,28 @@ export function createSyncer(options: SyncerOptions): Syncer {
       ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
       root,
     );
+    // `dirty` describes the working tree right now, not the debounce
+    // clock: the clock is per-session memory, null until the first tick
+    // (and while features are off), so it would under-report dirtiness.
+    const statusRes = await git(
+      ["-c", "core.quotePath=false", "status", "--porcelain"],
+      root,
+    );
+    const dirty =
+      statusRes.code === 0
+        ? statusRes.stdout.trim() !== ""
+        : state.dirtySince !== null;
     return {
       root,
       enabled: exists && config.enabled, // effective state (opt-in)
       configPath: join(root, CONFIG_FILE),
       configExists: exists,
-      atRoot: realCwd() === root,
+      atRoot: samePath(realCwd(), root),
       pollingIntervalMinutes: config.pollingIntervalMinutes,
       branch,
       upstream: upstreamRes.code === 0 ? upstreamRes.stdout.trim() : null,
       remote: await remoteUrl(root),
-      dirty: state.dirtySince !== null,
+      dirty,
       dirtySince: state.dirtySince,
       debounceMs,
       lastSyncAt: state.lastSyncAt,
@@ -673,6 +684,21 @@ export function createSyncer(options: SyncerOptions): Syncer {
   }
 
   return { state, tick, toggle, status, commitStaged };
+}
+
+/**
+ * Compares two absolute paths for identity. Git prints POSIX-style
+ * (forward-slash) paths on every platform, while Node fs APIs return
+ * native paths (backslashes on Windows); component and drive casing may
+ * also differ on Windows. Both must be tolerated, or the root guard
+ * treats a session at the repo root as a subfolder session.
+ */
+function samePath(a: string, b: string): boolean {
+  const na = a.replace(/\\/g, "/");
+  const nb = b.replace(/\\/g, "/");
+  return process.platform === "win32"
+    ? na.toLowerCase() === nb.toLowerCase()
+    : na === nb;
 }
 
 function firstLine(text: string): string {

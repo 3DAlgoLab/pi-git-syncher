@@ -198,7 +198,13 @@ function formatStatus(st: SyncerStatus): string {
     `branch: ${st.branch ?? "detached HEAD"}${st.upstream ? ` -> ${st.upstream}` : " (no upstream)"}`,
     `remote: ${st.remote ?? "none"}`,
     // Status shows local time (human-facing); commit messages keep UTC.
-    `dirty:  ${st.dirty ? `yes, quiet since ${new Date(st.dirtySince ?? 0).toLocaleString()}` : "no"}`,
+    `dirty:  ${
+      st.dirty
+        ? st.dirtySince
+          ? `yes, quiet since ${new Date(st.dirtySince).toLocaleString()}`
+          : "yes (debounce clock not running)"
+        : "no"
+    }`,
     `last:   ${st.lastSyncAt ? `${st.lastSyncKind} at ${new Date(st.lastSyncAt).toLocaleString()}` : "never"}`,
   ];
   if (!st.configExists)

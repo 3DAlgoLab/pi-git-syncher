@@ -1,6 +1,6 @@
 {
   "name": "pi-git-syncher",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "description": "pi extension: debounced automatic git commit & push and automatic pull, per repo, toggled with /git-sync",
   "keywords": [
     "pi-package",

@@ -1,10 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  chmod,
   mkdir,
   mkdtemp,
   readFile,
+  rename,
   rm,
   writeFile,
 } from "node:fs/promises";
@@ -17,6 +17,7 @@ import {
   loadConfig,
   parseConfig,
   saveConfig,
+  type GitRunner,
 } from "../syncer.ts";
 import {
   DEBOUNCE,
@@ -213,7 +214,8 @@ test("push: retries a failed push once the remote is reachable again", async (t)
   await writeFile(join(f.repo, "x.txt"), "x\n");
   await f.syncer.tick();
   advance(f, 31);
-  await chmod(f.remote, 0o555); // push fails (local transport can't write refs)
+  const blocked = f.remote + "-blocked";
+  await rename(f.remote, blocked); // push fails (remote unreachable)
   await f.syncer.tick(); // commit lands locally, push fails once
   assert.equal(
     (await sh(f.run, ["log", "-1", "--format=%s"], f.repo)).startsWith(
@@ -230,7 +232,7 @@ test("push: retries a failed push once the remote is reachable again", async (t)
   const warnings = f.notes.filter((n) =>
     n.message.includes("push failed"),
   ).length;
-  await chmod(f.remote, 0o755);
+  await rename(blocked, f.remote);
   await f.syncer.tick(); // remote reachable again -> push succeeds
   assert.equal(warnings, 1);
   assert.equal(
@@ -262,7 +264,8 @@ test("toggle: writes the config file and flips the flag", async (t) => {
   const f = await makeFixture(t);
   const res1 = await f.syncer.toggle();
   if ("error" in res1) throw new Error(res1.error);
-  assert.equal(res1.root, f.repo);
+  // Git prints forward slashes; the fixture path may be native style.
+  assert.equal(res1.root.replace(/\\/g, "/"), f.repo.replace(/\\/g, "/"));
   assert.equal(res1.enabled, false);
   assert.equal(
     (await readFile(join(f.repo, CONFIG_FILE), "utf8")).includes(
@@ -557,7 +560,8 @@ test("commitStaged: a failed push keeps the commit local and retries on the next
   await f.syncer.tick(); // stages + induces
   assert.equal(f.induced.length, 1);
 
-  await chmod(f.remote, 0o555); // push fails (local transport can't write refs)
+  const blocked = f.remote + "-blocked";
+  await rename(f.remote, blocked); // push fails (remote unreachable)
   const res = await f.syncer.commitStaged("feat: x");
   assert.equal(res.ok, false);
   assert.ok((res.error ?? "").includes("push failed"), res.error);
@@ -566,7 +570,7 @@ test("commitStaged: a failed push keeps the commit local and retries on the next
     "feat: x",
   );
 
-  await chmod(f.remote, 0o755);
+  await rename(blocked, f.remote);
   await f.syncer.tick(); // clean tree: pushes the pending commit
   assert.equal(
     await ref(f.run, f.remote, "main"),
@@ -623,3 +627,53 @@ test("clean tree: push/pull waits for idle", async (t) => {
   assert.equal(await sh(f.run, ["rev-list", "--count", "HEAD"], f.repo), "2");
   assert.ok(f.notes.some((n) => n.message.includes("pulled 1 new commit")));
 });
+test("root guard: git's slash style must not mask the repo root", async (t) => {
+  const f = await makeFixture(t);
+  // Git prints --show-toplevel with forward slashes even on Windows,
+  // while Node fs APIs yield native backslash paths. The guard must
+  // still treat the session as running at the repo root.
+  const posixStyle = f.repo.replace(/\\/g, "/");
+  const run: GitRunner = (args, cwd) =>
+    args[0] === "rev-parse" && args[1] === "--show-toplevel"
+      ? Promise.resolve({ code: 0, stdout: `${posixStyle}\n`, stderr: "" })
+      : f.run(args, cwd);
+  const syncer = createSyncer({
+    run,
+    getCwd: () => f.repo,
+    now: () => f.clock.now,
+    isIdle: () => true,
+    debounceMs: DEBOUNCE,
+  });
+  await syncer.tick();
+  assert.equal(
+    syncer.state.root,
+    posixStyle,
+    "tick must run for a session at the repo root",
+  );
+  const st = await syncer.status();
+  if ("error" in st) throw new Error(st.error);
+  assert.equal(st.atRoot, true);
+});
+
+test("status: reflects the real working tree, not the stale debounce clock", async (t) => {
+  const f = await makeFixture(t);
+
+  // Dirty before any tick: the in-memory clock is null, yet the status
+  // must report the dirty tree.
+  await writeFile(join(f.repo, "wip.txt"), "wip\n");
+  let st = await f.syncer.status();
+  if ("error" in st) throw new Error(st.error);
+  assert.equal(st.dirty, true);
+  assert.equal(st.atRoot, true);
+
+  // Arm the clock, then clean the tree without another tick: the stale
+  // clock must not keep the status dirty.
+  await f.syncer.tick();
+  assert.equal(f.syncer.state.dirtySince, f.clock.now);
+  await rm(join(f.repo, "wip.txt"));
+  st = await f.syncer.status();
+  if ("error" in st) throw new Error(st.error);
+  assert.equal(st.dirtySince, f.clock.now, "clock is still armed (stale)");
+  assert.equal(st.dirty, false, "status reflects the tree, not the clock");
+});
+
