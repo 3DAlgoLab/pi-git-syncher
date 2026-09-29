@@ -1,6 +1,6 @@
 {
   "name": "pi-git-syncher",
-  "version": "0.6.2",
+  "version": "0.6.3",
   "description": "pi extension: debounced automatic git commit & push and automatic pull, per repo, toggled with /git-sync",
   "keywords": [
     "pi-package",
@@ -20,14 +20,13 @@
     ]
   },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "*"
-  },
-  "dependencies": {
-    "typebox": "1.3.7"
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
   },
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "0.85.1",
     "@types/node": "^24.0.0",
+    "typebox": "1.3.7",
     "typescript": "^5.5.0"
   }
 }
