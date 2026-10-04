@@ -203,8 +203,10 @@ export function divergenceInstruction(
 
 /**
  * Instruction handed to the idle agent when the debounce clock expires: the
- * engine has staged everything; the agent only writes a proper message and
- * calls the host's git_syncher_commit tool.
+ * engine has staged everything; the agent writes a proper message and calls
+ * the host's git_syncher_commit tool. The optional language pass must re-stage
+ * only the files it touched: commitStaged never stages, so an unstaged fix
+ * would sit outside the very commit its message describes.
  */
 export function commitMessageInstruction(branch: string): string {
   return [
@@ -212,7 +214,8 @@ export function commitMessageInstruction(branch: string): string {
     "The changes are already staged (git add -A). Produce the commit:",
     "1. Review the staged changes: `git diff --cached` (start with `git diff --cached --stat` if the diff is large)",
     "2. Match the repo's commit style: `git log --oneline -10`",
-    '3. Call the `git_syncher_commit` tool with { "message": "..." } — it commits the staged changes and pushes. Do not run git commit/push yourself and do not edit any files.',
+    "3. Optional language pass, only when the project's own instructions (e.g. its AGENTS.md) ask for one: fix broken English or obvious typos and spacing in files the staged diff already includes, then `git add` only the files you changed — never `git add -A`, and never touch files the staged diff does not include.",
+    '4. Call the `git_syncher_commit` tool with { "message": "..." } — it commits the staged changes and pushes. Do not run git commit/push yourself, and make no other edits.',
     "Message rules: one concise commit — imperative subject line (max 72 chars) describing what actually changed; a short body only if it adds real context. If the staged diff turns out empty, stop and say so.",
   ].join("\n");
 }

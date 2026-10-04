@@ -13,6 +13,7 @@ import { join } from "node:path";
 import {
   COMMIT_PREFIX,
   CONFIG_FILE,
+  commitMessageInstruction,
   createSyncer,
   loadConfig,
   parseConfig,
@@ -438,6 +439,13 @@ test("merge in progress: a conflicted merge is never auto-committed", async (t) 
     "no auto-commit while a merge is in progress",
   );
 });
+test("instruction: the commit window allows a project-scoped language pass", () => {
+  const text = commitMessageInstruction("main");
+  assert.ok(text.includes("Optional language pass"), text);
+  assert.ok(text.includes("never `git add -A`"), text);
+  assert.ok(text.includes("git_syncher_commit"), text);
+});
+
 test("commit: with an agent hook, the idle agent writes the message", async (t) => {
   const f = await makeFixture(t);
   const remoteBefore = await ref(f.run, f.remote, "main");
