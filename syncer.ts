@@ -5,14 +5,22 @@
  * IS that repo's root: a session launched in a subfolder stays fully
  * dormant. Its features:
  *
- * - Automatic commit & push: while the working tree is dirty, a 30-minute
- *   debounce clock runs. Any new change (fingerprint change of the dirty
- *   state) restarts the clock. When the clock expires and pi is idle, the
- *   engine stages everything and, if an agent hook is available, hands the
- *   idle agent the job of writing a proper commit message: the agent calls
- *   the host's git_syncher_commit tool, and the engine commits & pushes.
- *   Without an agent hook it falls back to a fixed `chore(git-syncher)`
- *   message.
+ * - Automatic commit & push: while the working tree is dirty, a debounce
+ *   clock runs (`debounceMinutes`, default 30). Any new change (fingerprint
+ *   change of the dirty state) restarts the clock. When the clock expires
+ *   and pi is idle, the engine stages everything and, if an agent hook is
+ *   available, hands the idle agent the job of writing a proper commit
+ *   message: the agent calls the host's git_syncher_commit tool, and the
+ *   engine commits & pushes. Without an agent hook it falls back to a fixed
+ *   `chore(git-syncher)` message.
+ * - The agent's seat in the commit: the tool takes explicit path lists, so
+ *   the agent never runs git itself. `stage` adds files the agent produced
+ *   or reworked during its review pass (a companion note, a language fix);
+ *   `restoreStaged` drops paths that `git add -A` swept in but the project
+ *   keeps out of the history (a session log). Ignored paths are refused.
+ * - Post-commit pass (`postCommitPass`, default off): once the commit has
+ *   landed, the engine hands the agent one bounded follow-up turn to review
+ *   what just landed, when the project's own instructions ask for it.
  * - Automatic retrieving: while the working tree is clean, the engine
  *   fetches and, if the remote is ahead, runs `git pull --ff-only`.
  *   Pending local commits are pushed first (e.g. after a failed push).
@@ -34,10 +42,15 @@ import { join, resolve } from "node:path";
 
 export const CONFIG_FILE = ".git-syncher.json";
 export const DEFAULT_POLLING_MINUTES = 1;
-export const DEFAULT_DEBOUNCE_MS = 30 * 60 * 1000;
+export const DEFAULT_DEBOUNCE_MINUTES = 30;
+export const DEFAULT_DEBOUNCE_MS = DEFAULT_DEBOUNCE_MINUTES * 60 * 1000;
 export const COMMIT_PREFIX = "chore(git-syncher)";
 
+/** Cap on the path lists the agent may hand the commit tool. */
+export const MAX_AGENT_PATHS = 32;
+
 const MAX_POLLING_MINUTES = 1440;
+const MAX_DEBOUNCE_MINUTES = 1440;
 
 export interface GitResult {
   code: number;
@@ -49,6 +62,20 @@ export interface CommitStagedResult {
   ok: boolean;
   /** Human-readable reason when `ok` is false. */
   error?: string;
+  /** SHA of the commit that landed; set whenever a commit was created. */
+  commit?: string;
+  /** Paths staged through the tool's `stage` argument. */
+  staged?: string[];
+  /** Paths dropped from the index through `restoreStaged`. */
+  unstaged?: string[];
+}
+
+/** Path lists the agent may pass to the commit tool. */
+export interface CommitPaths {
+  /** Repo-relative paths to stage right before committing. */
+  stage?: string[];
+  /** Repo-relative paths to drop from the index before committing. */
+  restoreStaged?: string[];
 }
 
 /** Runs `git <args>` in `cwd`. */
@@ -59,6 +86,17 @@ export interface GitSyncherConfig {
   enabled: boolean;
   /** Minutes between polls. Default: 1. */
   pollingIntervalMinutes: number;
+  /**
+   * Minutes of quiet before the auto-commit window opens. Optional: absent
+   * keeps the 30-minute default, and `SyncerOptions.debounceMs` still wins
+   * (hosts that want to pin the clock).
+   */
+  debounceMinutes?: number;
+  /**
+   * After a commit lands, hand the agent one bounded review pass over what
+   * it just committed. Default: false (off).
+   */
+  postCommitPass?: boolean;
 }
 
 export interface SyncerOptions {
@@ -100,6 +138,11 @@ export interface SyncerState {
    * window, so a failed agent turn retries quietly instead of spamming.
    */
   commitInducedAt: number | null;
+  /**
+   * SHA of the commit whose post-commit review pass was already induced;
+   * the pass fires at most once per commit.
+   */
+  postCommitInducedFor: string | null;
   lastSyncAt: number | null;
   lastSyncKind: "commit" | "pull" | null;
 }
@@ -118,6 +161,8 @@ export interface SyncerStatus {
   dirty: boolean;
   dirtySince: number | null;
   debounceMs: number;
+  /** Whether the post-commit review pass is on for this repo. */
+  postCommitPass: boolean;
   lastSyncAt: number | null;
   lastSyncKind: "commit" | "pull" | null;
 }
@@ -130,11 +175,15 @@ export interface Syncer {
   toggle(): Promise<{ root: string; enabled: boolean } | { error: string }>;
   status(): Promise<SyncerStatus | { error: string }>;
   /**
-   * Commits the already-staged changes with the agent-generated message
-   * and pushes. Invoked by the host's git_syncher_commit tool; the
-   * syncher keeps control of the actual git operations.
+   * Commits the staged changes with the agent-generated message and pushes.
+   * Invoked by the host's git_syncher_commit tool; the syncher keeps control
+   * of the actual git operations: `paths.restoreStaged` are dropped from the
+   * index first, `paths.stage` are added, then the index is committed.
    */
-  commitStaged(message: string): Promise<CommitStagedResult>;
+  commitStaged(
+    message: string,
+    paths?: CommitPaths,
+  ): Promise<CommitStagedResult>;
 }
 
 /** Parses a raw config value; invalid fields fall back to defaults. */
@@ -156,8 +205,95 @@ export function parseConfig(raw: unknown): GitSyncherConfig {
         MAX_POLLING_MINUTES,
       );
     }
+    // Optional keys stay absent unless valid, so a config file written by an
+    // older version never grows fields it never asked for.
+    if (
+      typeof obj.debounceMinutes === "number" &&
+      Number.isFinite(obj.debounceMinutes) &&
+      obj.debounceMinutes > 0
+    ) {
+      config.debounceMinutes = Math.min(obj.debounceMinutes, MAX_DEBOUNCE_MINUTES);
+    }
+    if (typeof obj.postCommitPass === "boolean") {
+      config.postCommitPass = obj.postCommitPass;
+    }
   }
   return config;
+}
+
+/**
+ * Validates a path list from the agent before it reaches git. The list is an
+ * allowlist, not a shell: no options (`-A`, `.`), no absolute paths, no `..`
+ * escapes, no wildcards. Ignored paths are rejected by `git add` itself, so a
+ * file the repo keeps out of history cannot be smuggled in here.
+ */
+export function validateAgentPaths(
+  values: unknown,
+  label: string,
+): { paths: string[]; error?: string } {
+  if (values === undefined || values === null) return { paths: [] };
+  if (!Array.isArray(values)) {
+    return { paths: [], error: `\`${label}\` must be an array of paths` };
+  }
+  if (values.length > MAX_AGENT_PATHS) {
+    return {
+      paths: [],
+      error: `\`${label}\` lists ${values.length} paths; at most ${MAX_AGENT_PATHS} are allowed`,
+    };
+  }
+  const paths: string[] = [];
+  for (const value of values) {
+    if (typeof value !== "string") {
+      return { paths: [], error: `\`${label}\` must contain only strings` };
+    }
+    const path = value.trim();
+    if (!path) {
+      return { paths: [], error: `\`${label}\` contains an empty path` };
+    }
+    if (path.startsWith("-")) {
+      return {
+        paths: [],
+        error: `\`${label}\` may not contain git options: "${path}"`,
+      };
+    }
+    if (/\0/.test(path)) {
+      return { paths: [], error: `\`${label}\` contains an invalid path` };
+    }
+    if (path.startsWith(":")) {
+      return {
+        paths: [],
+        error: `\`${label}\` may not use git pathspec magic: "${path}"`,
+      };
+    }
+    if (/[*?[\]]/.test(path)) {
+      return {
+        paths: [],
+        error: `\`${label}\` must name concrete paths, no wildcards: "${path}"`,
+      };
+    }
+    const parts = path.split(/[\\/]+/);
+    if (path.startsWith("/") || /^[a-zA-Z]:[\\/]/.test(path)) {
+      return {
+        paths: [],
+        error: `\`${label}\` must hold repo-relative paths: "${path}"`,
+      };
+    }
+    if (parts.every((part) => part === "" || part === ".")) {
+      // "." would re-add the whole tree: exactly what the allowlist forbids.
+      return {
+        paths: [],
+        error: `\`${label}\` must name specific paths, not the whole repo`,
+      };
+    }
+    if (parts.some((part) => part === "..")) {
+      return {
+        paths: [],
+        error: `\`${label}\` may not escape the repo: "${path}"`,
+      };
+    }
+    if (!paths.includes(path)) paths.push(path);
+  }
+  return { paths };
 }
 
 export function loadConfig(root: string): {
@@ -177,6 +313,26 @@ export function saveConfig(root: string, config: GitSyncherConfig): void {
     join(root, CONFIG_FILE),
     `${JSON.stringify(config, null, 2)}\n`,
     "utf8",
+  );
+}
+
+/** Keys present in the config file that this version does not read. */
+export function unknownConfigKeys(root: string): string[] {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(readFileSync(join(root, CONFIG_FILE), "utf8"));
+  } catch {
+    return [];
+  }
+  if (!raw || typeof raw !== "object") return [];
+  const known = new Set([
+    "enabled",
+    "pollingIntervalMinutes",
+    "debounceMinutes",
+    "postCommitPass",
+  ]);
+  return Object.keys(raw as Record<string, unknown>).filter(
+    (key) => !known.has(key),
   );
 }
 
@@ -204,19 +360,43 @@ export function divergenceInstruction(
 /**
  * Instruction handed to the idle agent when the debounce clock expires: the
  * engine has staged everything; the agent writes a proper message and calls
- * the host's git_syncher_commit tool. The optional language pass must re-stage
- * only the files it touched: commitStaged never stages, so an unstaged fix
- * would sit outside the very commit its message describes.
+ * the host's git_syncher_commit tool. Everything the agent wants in the
+ * commit is declared through the tool's path arguments: commitStaged stages
+ * and unstages exactly those lists, so an edit or a companion note the agent
+ * made during the review still lands in the very commit it describes - and
+ * the agent never runs git add itself.
  */
-export function commitMessageInstruction(branch: string): string {
+export function commitMessageInstruction(
+  branch: string,
+  debounceMinutes: number = DEFAULT_DEBOUNCE_MINUTES,
+): string {
   return [
-    `[pi-git-syncher] Auto-commit window on branch '${branch}': the repo has uncommitted changes that have been quiet for 30 minutes.`,
+    `[pi-git-syncher] Auto-commit window on branch '${branch}': the repo has uncommitted changes that have been quiet for ${debounceMinutes} minute(s).`,
     "The changes are already staged (git add -A). Produce the commit:",
     "1. Review the staged changes: `git diff --cached` (start with `git diff --cached --stat` if the diff is large)",
     "2. Match the repo's commit style: `git log --oneline -10`",
-    "3. Optional language pass, only when the project's own instructions (e.g. its AGENTS.md) ask for one: fix broken English or obvious typos and spacing in files the staged diff already includes, then `git add` only the files you changed — never `git add -A`, and never touch files the staged diff does not include.",
-    '4. Call the `git_syncher_commit` tool with { "message": "..." } — it commits the staged changes and pushes. Do not run git commit/push yourself, and make no other edits.',
-    "Message rules: one concise commit — imperative subject line (max 72 chars) describing what actually changed; a short body only if it adds real context. If the staged diff turns out empty, stop and say so.",
+    "3. Optional language pass, only when the project's own instructions (e.g. its AGENTS.md) ask for one: fix broken English or obvious typos and spacing in files the staged diff already includes, and list every file you changed in the `stage` argument.",
+    "4. Companion files, only when the project's own instructions ask for one (e.g. a reflection note that belongs with this change): create it now and list it in `stage` as well. That is the only new file this turn may create.",
+    "5. If the staged set contains something the project's rules keep out of history (e.g. a session log), list it in `restoreStaged`: it is dropped from the index and stays untouched on disk.",
+    '6. Call the `git_syncher_commit` tool with { "message": "...", "stage": [...], "restoreStaged": [...] } — it stages those paths, unstages the listed ones, commits, and pushes. Do not run git commit/add/push yourself (`git add -A` included), and make no edits outside the paths you list.',
+    "Message rules: one concise commit — imperative subject line (max 72 chars) describing what actually changed; a short body only if it adds real context. If nothing is left staged, stop and say so.",
+  ].join("\n");
+}
+
+/**
+ * Instruction handed to the agent right after a commit lands, when the repo
+ * opts into `postCommitPass`. Bounded on purpose: the pass may only add new
+ * files, never rewrite the commit it is reviewing, and never stage: the next
+ * auto-commit window commits its output with its own message.
+ */
+export function postCommitInstruction(branch: string, subject: string): string {
+  return [
+    `[pi-git-syncher] A commit landed on '${branch}': "${subject}". The work it carried is history now.`,
+    "If the project's own instructions (e.g. its AGENTS.md) ask for a review or reflection pass on what just landed, do it now:",
+    "1. Read the commit: `git show --stat --oneline HEAD`, and the diff where it helps.",
+    "2. Write the pass's output as new files only. Never amend or revert the commit, never edit files it already contains, never rewrite files it just committed.",
+    "3. Stage nothing: the next auto-commit window commits your new files under their own message.",
+    "If the project asks for no such pass, do nothing and reply with one line saying so.",
   ].join("\n");
 }
 
@@ -225,8 +405,14 @@ export function createSyncer(options: SyncerOptions): Syncer {
   const now = options.now ?? Date.now;
   const isIdle = options.isIdle ?? (() => true);
   const notify = options.notify ?? (() => {});
-  const debounceMs = options.debounceMs ?? DEFAULT_DEBOUNCE_MS;
+  const debounceOverrideMs = options.debounceMs;
   const induce = options.induce;
+
+  /** Debounce clock: a host override wins, else the repo's config. */
+  function debounceFor(config: GitSyncherConfig): number {
+    if (debounceOverrideMs !== undefined) return debounceOverrideMs;
+    return (config.debounceMinutes ?? DEFAULT_DEBOUNCE_MINUTES) * 60_000;
+  }
 
   const state: SyncerState = {
     root: null,
@@ -236,6 +422,7 @@ export function createSyncer(options: SyncerOptions): Syncer {
     warned: new Set(),
     inducedDivergence: null,
     commitInducedAt: null,
+    postCommitInducedFor: null,
     lastSyncAt: null,
     lastSyncKind: null,
   };
@@ -355,12 +542,18 @@ export function createSyncer(options: SyncerOptions): Syncer {
   }
 
   /**
-   * Commits the already-staged changes with the agent-generated message and
-   * pushes. Invoked by the host's git_syncher_commit tool. Never stages
-   * anything: the tick that induced the agent staged exactly what it
-   * reviewed, and anything new is left for the next cycle.
+   * Commits the staged changes with the agent-generated message and pushes.
+   * Invoked by the host's git_syncher_commit tool. The only staging the
+   * engine accepts is the allowlist the agent declares: `restoreStaged`
+   * first (drop what `git add -A` swept in against the project's rules),
+   * then `stage` (add the agent's own rework or companion file), then the
+   * index is committed. Anything neither declared nor staged stays out and
+   * is left for the next cycle.
    */
-  async function commitStaged(message: string): Promise<CommitStagedResult> {
+  async function commitStaged(
+    message: string,
+    paths?: CommitPaths,
+  ): Promise<CommitStagedResult> {
     const root = await repoRoot();
     if (!root) return { ok: false, error: "not a git repository" };
     const mergeHead = await git(
@@ -381,6 +574,38 @@ export function createSyncer(options: SyncerOptions): Syncer {
     if (!remote) {
       return { ok: false, error: "no remote 'origin'; refusing to commit" };
     }
+    const stage = validateAgentPaths(paths?.stage, "stage");
+    if (stage.error) return { ok: false, error: stage.error };
+    const restore = validateAgentPaths(paths?.restoreStaged, "restoreStaged");
+    if (restore.error) return { ok: false, error: restore.error };
+
+    if (restore.paths.length) {
+      const unstage = await git(
+        ["restore", "--staged", "--", ...restore.paths],
+        root,
+      );
+      if (unstage.code !== 0) {
+        return {
+          ok: false,
+          error: `git restore --staged failed: ${firstLine(
+            unstage.stderr || unstage.stdout,
+          )}`,
+        };
+      }
+    }
+    if (stage.paths.length) {
+      const add = await git(["add", "--", ...stage.paths], root);
+      if (add.code !== 0) {
+        // `git add` refuses paths an ignore rule covers, so a file the repo
+        // keeps out of history cannot be staged through this tool.
+        return {
+          ok: false,
+          error: `git add failed for the listed paths: ${firstLine(
+            add.stderr || add.stdout,
+          )}`,
+        };
+      }
+    }
     const staged = await git(["diff", "--cached", "--quiet"], root);
     if (staged.code === 0) {
       return { ok: false, error: "nothing is staged; nothing to commit" };
@@ -394,12 +619,15 @@ export function createSyncer(options: SyncerOptions): Syncer {
         error: `git commit failed: ${firstLine(commit.stderr || commit.stdout)}`,
       };
     }
+    const shaRes = await git(["rev-parse", "HEAD"], root);
+    const sha = shaRes.code === 0 ? shaRes.stdout.trim() || null : null;
     // The staged set is committed; the dirty streak is over. If new
     // unstaged changes appeared meanwhile, the next tick starts a fresh
     // debounce clock for them.
     state.dirtySince = null;
     state.snapshot = null;
     state.commitInducedAt = null;
+    const subject = text.split("\n")[0].trim();
     const upstream = await hasUpstream(root);
     const push = await git(
       upstream ? ["push"] : ["push", "-u", "origin", branch],
@@ -412,14 +640,43 @@ export function createSyncer(options: SyncerOptions): Syncer {
         "warning",
         `push failed: ${detail} (commit kept local, will retry)`,
       );
+      await inducePostCommit(root, branch, subject, sha);
       return {
         ok: false,
         error: `committed locally, but the push failed: ${detail} — it will be pushed on the next sync`,
+        commit: sha ?? undefined,
+        staged: stage.paths,
+        unstaged: restore.paths,
       };
     }
     markSync("commit");
-    notify("info", `git-syncher: committed & pushed: ${text.split("\n")[0]}`);
-    return { ok: true };
+    notify("info", `git-syncher: committed & pushed: ${subject}`);
+    await inducePostCommit(root, branch, subject, sha);
+    return {
+      ok: true,
+      commit: sha ?? undefined,
+      staged: stage.paths,
+      unstaged: restore.paths,
+    };
+  }
+
+  /**
+   * The post-commit seat: one bounded follow-up turn for the agent, at most
+   * once per commit, and only when the repo opted into `postCommitPass`.
+   */
+  async function inducePostCommit(
+    root: string,
+    branch: string,
+    subject: string,
+    sha: string | null,
+  ): Promise<void> {
+    if (!induce) return;
+    const { config } = loadConfig(root);
+    if (!config.postCommitPass) return;
+    const key = sha ?? `subject:${subject}`;
+    if (state.postCommitInducedFor === key) return;
+    state.postCommitInducedFor = key;
+    await induce(postCommitInstruction(branch, subject));
   }
 
   /** For a clean tree: push pending local commits, then ff-only pull if behind. */
@@ -554,10 +811,17 @@ export function createSyncer(options: SyncerOptions): Syncer {
     state.root = root;
     const { config, exists } = loadConfig(root);
     if (exists && !state.excludedConfig) await ensureConfigExcluded(root);
+    for (const key of exists ? unknownConfigKeys(root) : []) {
+      warnOnce(
+        `config-key:${key}`,
+        `'${key}' in ${CONFIG_FILE} is not a known setting and is ignored`,
+      );
+    }
     // Opt-in: the features are off while the config file does not exist.
     if (!exists || !config.enabled) return;
     const branch = await currentBranch(root);
     if (!branch) return; // detached HEAD: leave the repo alone
+    const debounceMs = debounceFor(config);
     const statusRes = await git(
       ["-c", "core.quotePath=false", "status", "--porcelain"],
       root,
@@ -605,7 +869,12 @@ export function createSyncer(options: SyncerOptions): Syncer {
             return;
           }
           state.commitInducedAt = t;
-          await induce(commitMessageInstruction(branch));
+          await induce(
+            commitMessageInstruction(
+              branch,
+              Math.round(debounceMs / 60_000),
+            ),
+          );
           return;
         }
         // No agent hook: fall back to the fixed message.
@@ -644,6 +913,7 @@ export function createSyncer(options: SyncerOptions): Syncer {
     state.dirtySince = null;
     state.snapshot = null;
     state.commitInducedAt = null;
+    state.postCommitInducedFor = null;
     state.warned.clear();
     return { root, enabled: next.enabled };
   }
@@ -680,7 +950,8 @@ export function createSyncer(options: SyncerOptions): Syncer {
       remote: await remoteUrl(root),
       dirty,
       dirtySince: state.dirtySince,
-      debounceMs,
+      debounceMs: debounceFor(config),
+      postCommitPass: config.postCommitPass === true,
       lastSyncAt: state.lastSyncAt,
       lastSyncKind: state.lastSyncKind,
     };

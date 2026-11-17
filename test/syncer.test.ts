@@ -17,7 +17,10 @@ import {
   createSyncer,
   loadConfig,
   parseConfig,
+  postCommitInstruction,
   saveConfig,
+  unknownConfigKeys,
+  validateAgentPaths,
   type GitRunner,
 } from "../syncer.ts";
 import {
@@ -442,8 +445,20 @@ test("merge in progress: a conflicted merge is never auto-committed", async (t) 
 test("instruction: the commit window allows a project-scoped language pass", () => {
   const text = commitMessageInstruction("main");
   assert.ok(text.includes("Optional language pass"), text);
-  assert.ok(text.includes("never `git add -A`"), text);
+  assert.ok(text.includes("`stage`"), text);
+  assert.ok(text.includes("`restoreStaged`"), text);
+  assert.ok(
+    text.includes("Do not run git commit/add/push yourself"),
+    "git stays under the engine's control",
+  );
   assert.ok(text.includes("git_syncher_commit"), text);
+});
+
+test("instruction: the post-commit pass is bounded to new files", () => {
+  const text = postCommitInstruction("main", "feat: add note");
+  assert.ok(text.includes('"feat: add note"'), text);
+  assert.ok(text.includes("new files only"), text);
+  assert.ok(text.includes("Stage nothing"), text);
 });
 
 test("commit: with an agent hook, the idle agent writes the message", async (t) => {
@@ -683,5 +698,224 @@ test("status: reflects the real working tree, not the stale debounce clock", asy
   if ("error" in st) throw new Error(st.error);
   assert.equal(st.dirtySince, f.clock.now, "clock is still armed (stale)");
   assert.equal(st.dirty, false, "status reflects the tree, not the clock");
+});
+
+test("parseConfig: optional keys stay absent unless they are valid", () => {
+  assert.deepEqual(parseConfig(null), {
+    enabled: true,
+    pollingIntervalMinutes: 1,
+  });
+  assert.deepEqual(parseConfig({ postCommitPass: true, debounceMinutes: 10 }), {
+    enabled: true,
+    pollingIntervalMinutes: 1,
+    debounceMinutes: 10,
+    postCommitPass: true,
+  });
+  assert.deepEqual(
+    parseConfig({ debounceMinutes: 0, postCommitPass: "yes" }),
+    { enabled: true, pollingIntervalMinutes: 1 },
+  );
+  assert.equal(parseConfig({ debounceMinutes: 999999 }).debounceMinutes, 1440);
+});
+
+test("unknownConfigKeys: reports keys this version ignores", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "pi-git-syncher-keys-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(
+    join(root, CONFIG_FILE),
+    JSON.stringify({ enabled: true, pollingIntervalMinutes: 1, autoCommit: false }),
+    "utf8",
+  );
+  assert.deepEqual(unknownConfigKeys(root), ["autoCommit"]);
+  saveConfig(root, { enabled: true, pollingIntervalMinutes: 1 });
+  assert.deepEqual(unknownConfigKeys(root), []);
+});
+
+test("validateAgentPaths: an allowlist, not a shell", () => {
+  assert.deepEqual(validateAgentPaths(["a.md", "dir/b.md"], "stage"), {
+    paths: ["a.md", "dir/b.md"],
+  });
+  assert.deepEqual(validateAgentPaths(undefined, "stage"), { paths: [] });
+  for (const bad of [["-A"], ["."], ["./"], ["a/b/../.."], ["/etc/passwd"], ["../out.md"], ["a/../../b"], [""], ["*.md"], ["a?b.md"], ["dir/[ab]"], [":!out.md"]]) {
+    const res = validateAgentPaths(bad, "stage");
+    assert.ok(res.error, `${JSON.stringify(bad)} must be rejected`);
+  }
+  // A concrete path inside a folder stays valid, dot segments included.
+  assert.deepEqual(validateAgentPaths(["./notes/a.md"], "stage").paths, [
+    "./notes/a.md",
+  ]);
+  assert.ok(validateAgentPaths(["C:\\Users\\x\\a.md"], "stage").error);
+  assert.ok(validateAgentPaths("a.md", "stage").error);
+  const many = Array.from({ length: 33 }, (_, i) => `f${i}.md`);
+  assert.ok(validateAgentPaths(many, "stage").error);
+  // Duplicates collapse; Windows-style separators are allowed.
+  assert.deepEqual(validateAgentPaths(["a.md", "a.md", "dir\\b.md"], "stage"), {
+    paths: ["a.md", "dir\\b.md"],
+  });
+});
+
+test("commit: the agent's note joins the commit and a session log is excluded", async (t) => {
+  const f = await makeFixture(t);
+  await writeFile(join(f.repo, "note.md"), "work in progress\n");
+  await f.syncer.tick(); // stages everything
+  advance(f, 31);
+  await f.syncer.tick();
+  assert.equal(f.induced.length, 1);
+
+  // The agent writes a companion note in a subfolder and reworks the file it
+  // reviewed; both join the commit through `stage`.
+  await mkdir(join(f.repo, "notes"), { recursive: true });
+  await writeFile(join(f.repo, "notes", "reflection.md"), "insight\n");
+  await writeFile(join(f.repo, "note.md"), "work in progress, reworded\n");
+
+  const res = await f.syncer.commitStaged("docs: add note.md", {
+    stage: ["notes/reflection.md", "note.md"],
+  });
+  assert.equal(res.error, undefined, res.error);
+  assert.equal(res.ok, true);
+  assert.ok(res.commit, "the tool reports the commit sha");
+  assert.deepEqual(res.staged, ["notes/reflection.md", "note.md"]);
+  const names = await sh(
+    f.run,
+    ["show", "--name-only", "--format=", "HEAD"],
+    f.repo,
+  );
+  assert.ok(names.includes("notes/reflection.md"), names);
+  assert.equal(
+    await sh(f.run, ["show", "HEAD:note.md"], f.repo),
+    "work in progress, reworded",
+  );
+});
+
+test("commit: restoreStaged keeps a file out of history but on disk", async (t) => {
+  const f = await makeFixture(t);
+  await writeFile(join(f.repo, "note.md"), "work\n");
+  await writeFile(join(f.repo, "session-export.html"), "<title>Session Export</title>\n");
+  await f.syncer.tick();
+  advance(f, 31);
+  await f.syncer.tick();
+
+  const res = await f.syncer.commitStaged("docs: add note.md", {
+    restoreStaged: ["session-export.html"],
+  });
+  assert.equal(res.error, undefined, res.error);
+  assert.equal(res.ok, true);
+  const names = await sh(f.run, ["show", "--name-only", "--format=", "HEAD"], f.repo);
+  assert.ok(names.includes("note.md"), names);
+  assert.ok(!names.includes("session-export.html"), names);
+  // The file is untouched on disk and out of the index (back to untracked).
+  assert.equal(await exists(join(f.repo, "session-export.html")), true);
+  const status = await f.run(["status", "--porcelain"], f.repo);
+  assert.ok(status.stdout.includes("session-export.html"), status.stdout);
+});
+
+test("commit: a gitignored path cannot be staged through the tool", async (t) => {
+  const f = await makeFixture(t);
+  await writeFile(join(f.repo, ".gitignore"), "session-export.html\n");
+  await sh(f.run, ["add", "-A"], f.repo);
+  await sh(f.run, ["commit", "-m", "chore: add gitignore"], f.repo);
+  await writeFile(join(f.repo, "session-export.html"), "log\n");
+  await writeFile(join(f.repo, "note.md"), "work\n");
+  await f.syncer.tick();
+  advance(f, 31);
+  await f.syncer.tick();
+
+  const res = await f.syncer.commitStaged("docs: add note.md", {
+    stage: ["session-export.html"],
+  });
+  assert.equal(res.ok, false);
+  assert.match(res.error ?? "", /git add failed/);
+  assert.equal(
+    await sh(f.run, ["log", "-1", "--format=%s"], f.repo),
+    "chore: add gitignore",
+    "the rejected call must not commit anything",
+  );
+});
+
+test("commit: an escaping path is refused before git is called", async (t) => {
+  const f = await makeFixture(t);
+  await writeFile(join(f.repo, "note.md"), "work\n");
+  await f.syncer.tick();
+  advance(f, 31);
+  await f.syncer.tick();
+  const res = await f.syncer.commitStaged("docs: escape", {
+    stage: ["../../outside.md"],
+  });
+  assert.equal(res.ok, false);
+  assert.match(res.error ?? "", /may not escape the repo/);
+  assert.equal(
+    await sh(f.run, ["log", "-1", "--format=%s"], f.repo),
+    "init",
+    "nothing was committed",
+  );
+});
+
+test("post-commit pass: one bounded review turn per commit when enabled", async (t) => {
+  const f = await makeFixture(t);
+  saveConfig(f.repo, {
+    enabled: true,
+    pollingIntervalMinutes: 1,
+    postCommitPass: true,
+  });
+  await writeFile(join(f.repo, "a.txt"), "x\n");
+  await f.syncer.tick();
+  advance(f, 31);
+  await f.syncer.tick();
+  assert.equal(f.induced.length, 1, "commit window");
+
+  const res = await f.syncer.commitStaged("feat: a");
+  assert.equal(res.ok, true, res.error);
+  assert.equal(f.induced.length, 2, "post-commit pass induced");
+  assert.ok(f.induced[1].includes('"feat: a"'), f.induced[1]);
+  assert.ok(f.induced[1].includes("new files only"), f.induced[1]);
+
+  // The same commit never induces a second pass.
+  await f.syncer.tick();
+  assert.equal(f.induced.length, 2);
+});
+
+test("post-commit pass: off by default", async (t) => {
+  const f = await makeFixture(t);
+  await writeFile(join(f.repo, "a.txt"), "x\n");
+  await f.syncer.tick();
+  advance(f, 31);
+  await f.syncer.tick();
+  const res = await f.syncer.commitStaged("feat: a");
+  assert.equal(res.ok, true, res.error);
+  assert.equal(f.induced.length, 1, "no post-commit pass without config");
+});
+
+test("config: debounceMinutes drives the auto-commit window", async (t) => {
+  const f = await makeFixture(t);
+  saveConfig(f.repo, {
+    enabled: true,
+    pollingIntervalMinutes: 1,
+    debounceMinutes: 5,
+  });
+  // The fixture pins the clock through SyncerOptions; this test needs the
+  // config-driven clock, so build a syncer without that override.
+  const syncer = createSyncer({
+    run: f.run,
+    getCwd: () => f.repo,
+    now: () => f.clock.now,
+    isIdle: () => true,
+    notify: (type, message) => f.notes.push({ type, message }),
+    induce: (s) => {
+      f.induced.push(s);
+    },
+  });
+  await writeFile(join(f.repo, "a.txt"), "x\n");
+  await syncer.tick();
+  advance(f, 4);
+  await syncer.tick();
+  assert.equal(f.induced.length, 0, "not quiet long enough yet");
+  advance(f, 2);
+  await syncer.tick();
+  assert.equal(f.induced.length, 1);
+  assert.ok(f.induced[0].includes("quiet for 5 minute(s)"), f.induced[0]);
+  const st = await syncer.status();
+  if ("error" in st) throw new Error(st.error);
+  assert.equal(st.debounceMs, 5 * 60_000);
+  assert.equal(st.postCommitPass, false);
 });
 

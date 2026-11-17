@@ -31,6 +31,9 @@ interface CommitToolDetails {
   ok: boolean;
   error: string | null;
   subject: string | null;
+  commit: string | null;
+  staged: string[];
+  unstaged: string[];
 }
 
 export default function (pi: ExtensionAPI) {
@@ -47,27 +50,68 @@ export default function (pi: ExtensionAPI) {
       name: "git_syncher_commit",
       label: "Git Syncher: commit & push",
       description:
-        "Commit the already-staged changes of the current repo with the given message and push to origin. Only use it when a [pi-git-syncher] auto-commit message asks you to.",
+        "Commit the staged changes of the current repo with the given message and push to origin. Declare any paths you changed or created in `stage`, and paths that must stay out of the commit in `restoreStaged`; the engine performs every git operation. Only use it when a [pi-git-syncher] auto-commit message asks you to.",
       parameters: Type.Object({
         message: Type.String({
           description:
             "Full commit message: imperative subject line (max 72 chars), optional body after a blank line",
         }),
+        stage: Type.Optional(
+          Type.Array(Type.String(), {
+            description:
+              "Repo-relative paths to stage right before the commit: files you reworked during the language pass, plus the one companion file the project's instructions allow (e.g. a note). No options, wildcards, absolute paths or `..`. Ignored paths are refused. Max 32.",
+          }),
+        ),
+        restoreStaged: Type.Optional(
+          Type.Array(Type.String(), {
+            description:
+              "Repo-relative paths the pre-staging swept in that the project's rules keep out of history (e.g. a session log). They are dropped from the index; the files stay on disk untouched.",
+          }),
+        ),
       }),
       async execute(_toolCallId, params) {
         const s = syncer;
-        const res = s ? await s.commitStaged(params.message) : null;
+        const res = s
+          ? await s.commitStaged(params.message, {
+              stage: params.stage,
+              restoreStaged: params.restoreStaged,
+            })
+          : null;
         const subject = params.message.split("\n")[0].trim();
         const details: CommitToolDetails = res
-          ? { ok: res.ok, error: res.error ?? null, subject }
-          : { ok: false, error: "no active syncer", subject: null };
+          ? {
+              ok: res.ok,
+              error: res.error ?? null,
+              subject,
+              commit: res.commit ?? null,
+              staged: res.staged ?? [],
+              unstaged: res.unstaged ?? [],
+            }
+          : {
+              ok: false,
+              error: "no active syncer",
+              subject: null,
+              commit: null,
+              staged: [],
+              unstaged: [],
+            };
         return {
           content: [
             {
               type: "text" as const,
               text: res
                 ? res.ok
-                  ? `git-syncher: committed & pushed: ${subject}`
+                  ? `git-syncher: committed & pushed: ${subject}${
+                      res.commit ? ` (${res.commit.slice(0, 8)})` : ""
+                    }${
+                      res.staged?.length
+                        ? `; staged ${res.staged.join(", ")}`
+                        : ""
+                    }${
+                      res.unstaged?.length
+                        ? `; excluded ${res.unstaged.join(", ")}`
+                        : ""
+                    }`
                   : `git-syncher: ${res.error}`
                 : "git-syncher: no active syncer in this session",
             },
@@ -204,6 +248,9 @@ function formatStatus(st: SyncerStatus): string {
           ? `yes, quiet since ${new Date(st.dirtySince).toLocaleString()}`
           : "yes (debounce clock not running)"
         : "no"
+    }`,
+    `window: ${Math.round(st.debounceMs / 60_000)} min quiet; post-commit pass ${
+      st.postCommitPass ? "on" : "off"
     }`,
     `last:   ${st.lastSyncAt ? `${st.lastSyncKind} at ${new Date(st.lastSyncAt).toLocaleString()}` : "never"}`,
   ];
